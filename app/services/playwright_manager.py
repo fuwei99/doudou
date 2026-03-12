@@ -145,8 +145,14 @@ class PlaywrightManager:
                         } catch(e) { return {}; }
                     }
                 """)
-                if current_fingerprint.get('fp') and not settings.DOUBAO_FP:
-                    logger.info(f"动态提取到页面指纹: {current_fingerprint}")
+                if current_fingerprint.get('fp'):
+                    # 动态更新指纹信息
+                    self.static_device_fingerprint.update({
+                        'device_id': current_fingerprint.get('device_id') or self.static_device_fingerprint['device_id'],
+                        'fp': current_fingerprint.get('fp') or self.static_device_fingerprint['fp'],
+                        'web_id': current_fingerprint.get('web_id') or self.static_device_fingerprint['web_id']
+                    })
+                    logger.success(f"已从页面动态更新指纹信息: {self.static_device_fingerprint}")
             
             except TimeoutError:
                 # 获取更详细的诊断信息

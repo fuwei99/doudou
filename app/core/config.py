@@ -78,7 +78,12 @@ class Settings(BaseSettings):
 
         # --- 核心变更: 验证设备指纹是否已配置 ---
         if not all([self.DOUBAO_DEVICE_ID, self.DOUBAO_FP, self.DOUBAO_TEA_UUID, self.DOUBAO_WEB_ID]):
-            raise ValueError("必须在 .env 文件中配置完整的设备指纹参数 (DOUBAO_DEVICE_ID, DOUBAO_FP, DOUBAO_TEA_UUID, DOUBAO_WEB_ID)")
+            logger.warning("未在 .env 中配置完整的设备指纹镜像，将尝试使用内置默认值或动态获取。")
+            # 设置一些默认值以防完全为空导致后续拼接失败
+            self.DOUBAO_DEVICE_ID = self.DOUBAO_DEVICE_ID or "7600236600187471401"
+            self.DOUBAO_FP = self.DOUBAO_FP or "verify_mkxf3p9i_hUn2VGVE_y5cH_4yp9_BjK6_iNSvN3wCyROz"
+            self.DOUBAO_TEA_UUID = self.DOUBAO_TEA_UUID or "7468737889876035084"
+            self.DOUBAO_WEB_ID = self.DOUBAO_WEB_ID or "7468737889876035084"
         
         return self
 
