@@ -487,27 +487,31 @@ class DoubaoProvider(BaseProvider):
         # 3. 构造 content_block
         content_blocks = []
         
-        # 如果有图片，先添加图片块 (block_type: 10052)
-        for uri in image_uris:
+        # 如果有图片，所有图片合并到一个 block_type: 10052 的 attachments 数组中
+        if image_uris:
+            attachments = []
+            for uri in image_uris:
+                attachments.append({
+                    "type": 1,
+                    "identifier": str(uuid.uuid4()),
+                    "image": {
+                        "name": "image.png",
+                        "uri": uri,
+                        "image_ori": {"url": "", "width": 0, "height": 0, "format": "", "url_formats": {}}
+                    },
+                    "parse_state": 0,
+                    "review_state": 1,
+                    "upload_status": 1,
+                    "progress": 100,
+                    "src": ""
+                })
             content_blocks.append({
                 "block_type": 10052,
                 "content": {
                     "attachment_block": {
-                        "attachments": [
-                            {
-                                "type": 1,
-                                "identifier": str(uuid.uuid4()),
-                                "image": {
-                                    "name": "image.png",
-                                    "uri": uri,
-                                    "image_ori": {"url": "", "width": 0, "height": 0, "format": "", "url_formats": {}}
-                                },
-                                "upload_status": 1,
-                                "progress": 100
-                            }
-                        ],
-                        "pc_event_block": ""
-                    }
+                        "attachments": attachments
+                    },
+                    "pc_event_block": ""
                 },
                 "block_id": str(uuid.uuid4()),
                 "parent_id": "",
