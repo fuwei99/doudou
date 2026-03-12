@@ -512,24 +512,27 @@ class DoubaoProvider(BaseProvider):
         
         # 强制上传指令检测
         force_upload_txt = "<||upload-txt:True||>" in full_prompt
-        # 预先清理指令后的全量文本 (备用)
-        clean_full_prompt = full_prompt.replace("<||upload-txt:True||>", "").strip()
+        # 强制将最新消息也放入文件的指令检测
+        upload_last = "<||upload-last:True||>" in full_prompt
+
+        # 清理所有自定义指令后的全量文本 (备用)
+        clean_full_prompt = full_prompt.replace("<||upload-txt:True||>", "").replace("<||upload-last:True||>", "").strip()
 
         actual_prompt = clean_full_prompt
 
         if len(clean_full_prompt) > 100000 or force_upload_txt:
-            logger.info(f"触发文本转附件上传 (长度: {len(clean_full_prompt)}, 强制: {force_upload_txt})")
+            logger.info(f"触发文本转附件上传 (长度: {len(clean_full_prompt)}, 强制: {force_upload_txt}, 包含最新消息: {upload_last})")
             
-            # 优化方案：将历史背景放入文件，将最重要的一条提问留在正文
-            if len(messages) > 1:
+            # 优化方案：默认将历史背景放入文件，将提问留在正文；若有 upload-last 则全部放入文件
+            if len(messages) > 1 and not upload_last:
                 history_prompt = convert_messages_to_prompt(messages[:-1])
                 last_msg_prompt = convert_messages_to_prompt(messages[-1:])
                 
                 # 清理指令
-                prompt_to_file = history_prompt.replace("<||upload-txt:True||>", "").strip()
-                actual_prompt = last_msg_prompt.replace("<||upload-txt:True||>", "").strip()
+                prompt_to_file = history_prompt.replace("<||upload-txt:True||>", "").replace("<||upload-last:True||>", "").strip()
+                actual_prompt = last_msg_prompt.replace("<||upload-txt:True||>", "").replace("<||upload-last:True||>", "").strip()
             else:
-                # 如果只有一条消息且触发了上传，则将全内容放入文件，正文保留占位
+                # 若包含 upload-last 指令，或只有一条消息，则将清理后的全内容放入文件
                 prompt_to_file = clean_full_prompt
                 actual_prompt = "Assistant:"
 
