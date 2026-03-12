@@ -13,7 +13,14 @@ def convert_messages_to_prompt(messages: List[Dict[str, Any]]) -> str:
     
     for msg in messages:
         role = msg.get("role", "user")
-        content = msg.get("content", "")
+        content_raw = msg.get("content", "")
+        
+        # 处理 OpenAI 多模态格式 (content 是 list)
+        if isinstance(content_raw, list):
+            text_parts = [item.get("text", "") for item in content_raw if item.get("type") == "text"]
+            content = " ".join(text_parts)
+        else:
+            content = content_raw
         
         if role == "system":
             prompt_parts.append(f"System: {content}")

@@ -17,6 +17,7 @@ from app.services.playwright_manager import PlaywrightManager
 from app.services.session_manager import SessionManager
 from app.utils.sse_utils import create_sse_data, create_chat_completion_chunk, DONE_CHUNK
 from app.utils.message_convert import convert_messages_to_prompt
+from app.utils.image_upload import ImageUploader
 
 
 class DoubaoProvider(BaseProvider):
@@ -24,11 +25,13 @@ class DoubaoProvider(BaseProvider):
         self.credential_manager = CredentialManager(settings.DOUBAO_COOKIES)
         self.session_manager = SessionManager()
         self.playwright_manager = PlaywrightManager()
+        self.image_uploader: ImageUploader = None
         self.client: httpx.AsyncClient = None
 
     async def initialize(self):
         self.client = httpx.AsyncClient(timeout=settings.API_REQUEST_TIMEOUT)
         await self.playwright_manager.initialize(self.credential_manager.credentials)
+        self.image_uploader = ImageUploader(self.playwright_manager, self.client, settings)
 
     async def close(self):
         if self.client:
@@ -111,7 +114,7 @@ class DoubaoProvider(BaseProvider):
                 "web_tab_id": str(uuid.uuid4())
             }
             headers = self._prepare_headers(final_cookie)
-            payload = self._prepare_payload(messages, bot_id, conversation_id, user_model)
+            payload = await self._prepare_payload(messages, bot_id, conversation_id, user_model, final_cookie)
 
             log_headers = headers.copy()
             log_headers["Cookie"] = "[REDACTED FOR SECURITY]"
@@ -295,7 +298,7 @@ class DoubaoProvider(BaseProvider):
                 "web_tab_id": str(uuid.uuid4())
             }
             headers = self._prepare_headers(final_cookie)
-            payload = self._prepare_payload(messages, bot_id, conversation_id, user_model)
+            payload = await self._prepare_payload(messages, bot_id, conversation_id, user_model, final_cookie)
 
             log_headers = headers.copy()
             log_headers["Cookie"] = "[REDACTED FOR SECURITY]"
@@ -454,13 +457,79 @@ class DoubaoProvider(BaseProvider):
             "sec-fetch-dest": "empty", "sec-fetch-mode": "cors", "sec-fetch-site": "same-origin",
         }
 
-    def _prepare_payload(self, messages: List[Dict[str, Any]], bot_id: str, conversation_id: str, user_model: str) -> Dict[str, Any]:
-        # 核心修复: 使用 convert_messages_to_prompt 拼接历史记录为单条 Prompt
+    async def _prepare_payload(self, messages: List[Dict[str, Any]], bot_id: str, conversation_id: str, user_model: str, cookie: str) -> Dict[str, Any]:
+        """
+        构造发送给上游豆包 API 的核心 Payload。
+        支持多模态输入（检测最后一条消息中的图片）。
+        """
+        # 1. 提取文字 Prompt
         full_prompt = convert_messages_to_prompt(messages)
-        logger.info(f"已将 {len(messages)} 条原始消息拼接为单条 Prompt")
+        
+        # 2. 检测最新的一条消息是否有图片
+        image_uris = []
+        last_msg = messages[-1] if messages else {}
+        last_content = last_msg.get("content", "")
+        
+        if isinstance(last_content, list):
+            for item in last_content:
+                if item.get("type") == "image_url":
+                    img_url = item.get("image_url", {}).get("url")
+                    if img_url:
+                        logger.info(f"检测到输入图片，正在上传...")
+                        uri = await self.image_uploader.upload(img_url, cookie)
+                        if uri:
+                            image_uris.append(uri)
+                            logger.success(f"图片上传成功: {uri}")
 
         local_conv_id = f"local_{uuid.uuid4().hex}"
         local_msg_id = str(uuid.uuid4())
+        
+        # 3. 构造 content_block
+        content_blocks = []
+        
+        # 如果有图片，先添加图片块 (block_type: 10052)
+        for uri in image_uris:
+            content_blocks.append({
+                "block_type": 10052,
+                "content": {
+                    "attachment_block": {
+                        "attachments": [
+                            {
+                                "type": 1,
+                                "identifier": str(uuid.uuid4()),
+                                "image": {
+                                    "name": "image.png",
+                                    "uri": uri,
+                                    "image_ori": {"url": "", "width": 0, "height": 0, "format": "", "url_formats": {}}
+                                },
+                                "upload_status": 1,
+                                "progress": 100
+                            }
+                        ],
+                        "pc_event_block": ""
+                    }
+                },
+                "block_id": str(uuid.uuid4()),
+                "parent_id": "",
+                "meta_info": [],
+                "append_fields": []
+            })
+            
+        # 添加文本块 (block_type: 10000)
+        content_blocks.append({
+            "block_type": 10000,
+            "content": {
+                "text_block": {
+                    "text": full_prompt,
+                    "icon_url": "", "icon_url_dark": "", "summary": ""
+                },
+                "pc_event_block": ""
+            },
+            "block_id": str(uuid.uuid4()),
+            "parent_id": "",
+            "meta_info": [],
+            "append_fields": []
+        })
         
         payload = {
             "client_meta": {
@@ -473,24 +542,7 @@ class DoubaoProvider(BaseProvider):
             "messages": [
                 {
                     "local_message_id": local_msg_id,
-                    "content_block": [
-                        {
-                            "block_type": 10000,
-                            "content": {
-                                "text_block": {
-                                    "text": full_prompt,
-                                    "icon_url": "",
-                                    "icon_url_dark": "",
-                                    "summary": ""
-                                },
-                                "pc_event_block": ""
-                            },
-                            "block_id": str(uuid.uuid4()),
-                            "parent_id": "",
-                            "meta_info": [],
-                            "append_fields": []
-                        }
-                    ],
+                    "content_block": content_blocks,
                     "message_status": 0
                 }
             ],
