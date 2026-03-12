@@ -73,3 +73,9 @@ async def list_models():
 @app.get("/", summary="根路径", include_in_schema=False)
 def root():
     return {"message": f"欢迎来到 {settings.APP_NAME} v{settings.APP_VERSION}. 服务运行正常。"}
+
+if __name__ == "__main__":
+    import uvicorn
+    # 使用 settings 中配置的 NGINX_PORT 启动服务
+    logger.info(f"正在启动服务，端口: {settings.NGINX_PORT}")
+    uvicorn.run(app, host="0.0.0.0", port=settings.NGINX_PORT)

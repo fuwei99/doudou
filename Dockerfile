@@ -44,5 +44,6 @@ USER appuser
 RUN playwright install chromium
 
 # 暴露端口并启动
-EXPOSE 8000
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]
+# 默认使用 7860 端口（可以通过 NGINX_PORT 环境变量覆盖）
+EXPOSE 7860
+CMD ["python", "main.py"]
