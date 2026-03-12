@@ -5,14 +5,14 @@ import hmac
 import uuid
 import httpx
 from datetime import datetime
-from typing import Dict, Optional, Tuple
+from typing import Dict, Any, Optional, Tuple
 from urllib.parse import quote
 from loguru import logger
 
 from app.core.config import settings
 
 
-class ImageUploader:
+class FileUploader:
     def __init__(self, playwright_manager, client: httpx.AsyncClient, app_settings):
         self.playwright_manager = playwright_manager
         self.client = client
@@ -34,22 +34,24 @@ class ImageUploader:
             "pc_version": "3.9.0",
         }
 
-    async def upload(self, image_input: str, cookie: str) -> Optional[str]:
+    async def upload(self, input_source: str, cookie: str, resource_type: int = 2) -> Optional[Dict[str, Any]]:
         """
-        完整的图片上传流程: Prepare -> Apply -> Put -> Commit
-        image_input: 可以是 base64 (data:image/...) 也可以是 http URL
-        返回: TOS URI (如 tos-cn-i-a9rns2rl98/xxx.png)
+        完整的上传流程: Prepare -> Apply -> Put (POST) -> Commit
+        input_source: 可以是 base64 (data:image/...) 也可以是 http URL
+        resource_type: 1 为普通文件(txt), 2 为图片
+        返回: {"uri": "tos-cn-xxx", "size": 1234}
         """
         try:
-            # 0. 获取图片二进制数据
-            image_data, extension = await self._get_image_data(image_input)
-            if not image_data:
-                logger.error("无法获取图片数据，跳过上传。")
+            # 0. 获取原始数据
+            data, extension = await self._get_image_data(input_source)
+            if not data:
+                logger.error("无法获取上传数据数据，跳过上传。")
                 return None
-            logger.info(f"已获取图片数据, 大小: {len(image_data)} 字节, 格式: {extension}")
+            data_size = len(data)
+            logger.info(f"已获取数据, 大小: {data_size} 字节, 格式: {extension}")
 
             # 1. Prepare Upload - 获取上传凭证
-            auth_info, service_id = await self._prepare_upload(cookie)
+            auth_info, service_id = await self._prepare_upload(cookie, resource_type)
             if not auth_info or not service_id:
                 logger.error("Prepare Upload 失败，无法获取上传凭证。")
                 return None
@@ -57,15 +59,15 @@ class ImageUploader:
 
             # 2. Apply Upload - 申请存储位置
             store_uri, store_auth, upload_host, session_key, upload_id = await self._apply_upload(
-                auth_info, service_id, extension, len(image_data), cookie
+                auth_info, service_id, extension, data_size, cookie
             )
             if not store_uri or not session_key:
                 logger.error("Apply Upload 失败，无法获取存储路径。")
                 return None
             logger.success(f"Apply Upload 成功, store_uri: {store_uri}, host: {upload_host}, upload_id: {upload_id}")
 
-            # 3. Put - 实际上传二进制数据到 TOS
-            put_ok = await self._put_data(upload_host, store_uri, store_auth, image_data, upload_id, extension)
+            # 3. Put - 实际上传二进制数据
+            put_ok = await self._put_data(upload_host, store_uri, store_auth, data, upload_id, extension)
             if not put_ok:
                 logger.error("Put 二进制数据上传失败。")
                 return None
@@ -77,10 +79,46 @@ class ImageUploader:
                 logger.error("Commit Upload 失败。")
                 return None
             logger.success(f"Commit Upload 成功, 最终 URI: {final_uri}")
-            return final_uri
+            return {"uri": final_uri, "size": data_size}
 
         except Exception as e:
-            logger.error(f"图片上传流程异常: {e}", exc_info=True)
+            logger.error(f"上传流程异常: {e}", exc_info=True)
+            return None
+
+    async def upload_text(self, text: str, cookie: str, filename: str = "assistant.txt") -> Optional[Dict[str, Any]]:
+        """
+        将文本直接上传为附件
+        """
+        try:
+            data = text.encode('utf-8')
+            data_size = len(data)
+            extension = ".txt"
+            
+            # 1. Prepare Upload (resource_type=1)
+            auth_info, service_id = await self._prepare_upload(cookie, resource_type=1)
+            if not auth_info or not service_id:
+                return None
+
+            # 2. Apply Upload
+            store_uri, store_auth, upload_host, session_key, upload_id = await self._apply_upload(
+                auth_info, service_id, extension, data_size, cookie
+            )
+            if not store_uri:
+                return None
+
+            # 3. Put (POST)
+            put_ok = await self._put_data(upload_host, store_uri, store_auth, data, upload_id, extension)
+            if not put_ok:
+                return None
+
+            # 4. Commit
+            final_uri = await self._commit_upload(auth_info, service_id, session_key, cookie)
+            if not final_uri:
+                return None
+
+            return {"uri": final_uri, "size": data_size}
+        except Exception as e:
+            logger.error(f"文本上传异常: {e}")
             return None
 
     # ==================== 内部方法 ====================
@@ -119,14 +157,14 @@ class ImageUploader:
             logger.error(f"获取图片数据时出错: {e}")
             return None, "png"
 
-    async def _prepare_upload(self, cookie: str) -> Tuple[Optional[Dict], Optional[str]]:
+    async def _prepare_upload(self, cookie: str, resource_type: int = 2) -> Tuple[Optional[Dict], Optional[str]]:
         """
         第一步: 调用 alice/resource/prepare_upload
-        获取 ImageX 的 upload_auth_token (AK/SK/SessionToken) 和 service_id
+        resource_type: 2=图片, 1=文件
         """
         base_url = "https://www.doubao.com/alice/resource/prepare_upload"
         base_params = self._get_standard_base_params()
-        payload = {"tenant_id": "5", "scene_id": "5", "resource_type": 2}
+        payload = {"tenant_id": "5", "scene_id": "5", "resource_type": resource_type}
         headers = {
             "Content-Type": "application/json",
             "Cookie": cookie,

@@ -17,7 +17,7 @@ from app.services.playwright_manager import PlaywrightManager
 from app.services.session_manager import SessionManager
 from app.utils.sse_utils import create_sse_data, create_chat_completion_chunk, DONE_CHUNK
 from app.utils.message_convert import convert_messages_to_prompt
-from app.utils.image_upload import ImageUploader
+from app.utils.image_upload import FileUploader
 
 
 class DoubaoProvider(BaseProvider):
@@ -25,13 +25,13 @@ class DoubaoProvider(BaseProvider):
         self.credential_manager = CredentialManager(settings.DOUBAO_COOKIES)
         self.session_manager = SessionManager()
         self.playwright_manager = PlaywrightManager()
-        self.image_uploader: ImageUploader = None
+        self.file_uploader: FileUploader = None
         self.client: httpx.AsyncClient = None
 
     async def initialize(self):
         self.client = httpx.AsyncClient(timeout=settings.API_REQUEST_TIMEOUT)
         await self.playwright_manager.initialize(self.credential_manager.credentials)
-        self.image_uploader = ImageUploader(self.playwright_manager, self.client, settings)
+        self.file_uploader = FileUploader(self.playwright_manager, self.client, settings)
 
     async def close(self):
         if self.client:
@@ -467,6 +467,7 @@ class DoubaoProvider(BaseProvider):
         
         # 2. 检测最新的一条消息是否有图片
         image_uris = []
+        attachments = []
         last_msg = messages[-1] if messages else {}
         last_content = last_msg.get("content", "")
         
@@ -476,10 +477,10 @@ class DoubaoProvider(BaseProvider):
                     img_url = item.get("image_url", {}).get("url")
                     if img_url:
                         logger.info(f"检测到输入图片，正在上传...")
-                        uri = await self.image_uploader.upload(img_url, cookie)
-                        if uri:
-                            image_uris.append(uri)
-                            logger.success(f"图片上传成功: {uri}")
+                        upload_result = await self.file_uploader.upload(img_url, cookie, resource_type=2)
+                        if upload_result:
+                            image_uris.append(upload_result["uri"])
+                            logger.success(f"图片上传成功: {upload_result['uri']}")
 
         local_conv_id = f"local_{uuid.uuid4().hex}"
         local_msg_id = str(uuid.uuid4())
@@ -505,11 +506,47 @@ class DoubaoProvider(BaseProvider):
                     "progress": 100,
                     "src": ""
                 })
+
+        # 2.5 检测文本长度，如果超过 10w 字则转为附件
+        file_attachments = []
+        actual_prompt = full_prompt
+        if len(full_prompt) > 100000:
+            logger.info(f"检测到超长文本 ({len(full_prompt)} 字符)，正在转为附件上传...")
+            file_result = await self.file_uploader.upload_text(full_prompt, cookie)
+            if file_result:
+                file_attachments.append({
+                    "type": 3,
+                    "identifier": str(uuid.uuid4()),
+                    "file": {
+                        "uri": file_result["uri"],
+                        "url": "",
+                        "file_type": 0,
+                        "name": f"{uuid.uuid4().hex[:8]}.txt",
+                        "size": file_result["size"]
+                    },
+                    "parse_state": 1,
+                    "review_state": 1,
+                    "upload_status": 1,
+                    "progress": 100,
+                    "src": ""
+                })
+                actual_prompt = "Assistant:"
+                logger.success(f"超长文本已上传为附件: {file_result['uri']}")
+
+        local_conv_id = f"local_{uuid.uuid4().hex}"
+        local_msg_id = str(uuid.uuid4())
+        
+        # 3. 构造 content_block
+        content_blocks = []
+        
+        # 合并所有附件 (图片 + 文件) 到 block_type: 10052
+        all_attachments = attachments + file_attachments
+        if all_attachments:
             content_blocks.append({
                 "block_type": 10052,
                 "content": {
                     "attachment_block": {
-                        "attachments": attachments
+                        "attachments": all_attachments
                     },
                     "pc_event_block": ""
                 },
@@ -524,7 +561,7 @@ class DoubaoProvider(BaseProvider):
             "block_type": 10000,
             "content": {
                 "text_block": {
-                    "text": full_prompt,
+                    "text": actual_prompt,
                     "icon_url": "", "icon_url_dark": "", "summary": ""
                 },
                 "pc_event_block": ""
