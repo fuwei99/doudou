@@ -5,6 +5,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import model_validator
 from typing import Optional, List, Dict
 from dotenv import load_dotenv
+from loguru import logger
 
 # 核心修复: 在 Pydantic 读取之前显式加载 .env 到环境变量
 # 这样 os.getenv 才能在本地测试和运行中正确获取到值
@@ -30,11 +31,11 @@ class Settings(BaseSettings):
 
     # --- 核心变更: 静态设备指纹配置 ---
     # 从您提供的有效请求中提取的静态设备指纹，这比动态嗅探稳定得多
-    # 如果未来失效，只需从浏览器抓取新的请求并更新此处的值
-    DOUBAO_DEVICE_ID: Optional[str] = None
-    DOUBAO_FP: Optional[str] = None
-    DOUBAO_TEA_UUID: Optional[str] = None
-    DOUBAO_WEB_ID: Optional[str] = None
+    # 如果环境变量未配置，将默认使用下方的内置指纹
+    DOUBAO_DEVICE_ID: str = "7600236600187471401"
+    DOUBAO_FP: str = "verify_mkxf3p9i_hUn2VGVE_y5cH_4yp9_BjK6_iNSvN3wCyROz"
+    DOUBAO_TEA_UUID: str = "7468737889876035084"
+    DOUBAO_WEB_ID: str = "7468737889876035084"
 
     # --- 上游 API 配置 ---
     API_REQUEST_TIMEOUT: int = 180
@@ -75,15 +76,6 @@ class Settings(BaseSettings):
         
         if not self.DOUBAO_COOKIES:
             logger.info("未在 .env 中发现 DOUBAO_COOKIE_X，将尝试从 cookies 目录加载。")
-
-        # --- 核心变更: 验证设备指纹是否已配置 ---
-        if not all([self.DOUBAO_DEVICE_ID, self.DOUBAO_FP, self.DOUBAO_TEA_UUID, self.DOUBAO_WEB_ID]):
-            logger.warning("未在 .env 中配置完整的设备指纹镜像，将尝试使用内置默认值或动态获取。")
-            # 设置一些默认值以防完全为空导致后续拼接失败
-            self.DOUBAO_DEVICE_ID = self.DOUBAO_DEVICE_ID or "7600236600187471401"
-            self.DOUBAO_FP = self.DOUBAO_FP or "verify_mkxf3p9i_hUn2VGVE_y5cH_4yp9_BjK6_iNSvN3wCyROz"
-            self.DOUBAO_TEA_UUID = self.DOUBAO_TEA_UUID or "7468737889876035084"
-            self.DOUBAO_WEB_ID = self.DOUBAO_WEB_ID or "7468737889876035084"
         
         return self
 
