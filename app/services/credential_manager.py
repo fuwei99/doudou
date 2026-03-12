@@ -14,8 +14,9 @@ class CredentialManager:
             raise ValueError("未找到任何有效凭证（环境变量或 cookies 目录）。")
             
         self.index = 0
+        self.failure_count = 0  # 连续失败计数
         self.lock = threading.Lock()
-        logger.info(f"凭证管理器已初始化，共加载 {len(self.credentials)} 个凭证。")
+        logger.info(f"凭证管理器已初始化，共加载 {len(self.credentials)} 个凭证。当前使用索引: {self.index}")
 
     def _load_all_credentials(self, env_credentials: List[str]) -> List[str]:
         """合并环境变量和目录中的凭证"""
@@ -52,8 +53,27 @@ class CredentialManager:
         return creds
 
     def get_credential(self) -> str:
+        """获取当前正在使用的凭证（不自动切换）"""
         with self.lock:
             credential = self.credentials[self.index]
-            self.index = (self.index + 1) % len(self.credentials)
-            logger.debug(f"轮询到凭证索引: {self.index}")
+            logger.debug(f"使用凭证索引: {self.index} (连续失败次数: {self.failure_count})")
             return credential
+
+    def report_failure(self):
+        """上报当前凭证失败。如果连续失败达到3次，则强制切换。"""
+        with self.lock:
+            self.failure_count += 1
+            if self.failure_count >= 3:
+                old_index = self.index
+                self.index = (self.index + 1) % len(self.credentials)
+                self.failure_count = 0
+                logger.warning(f"凭证索引 {old_index} 连续失败3次，已切换到索引: {self.index}")
+            else:
+                logger.info(f"当前凭证索引 {self.index} 失败计数: {self.failure_count}/3")
+
+    def report_success(self):
+        """成功时重置失败计数"""
+        with self.lock:
+            if self.failure_count > 0:
+                self.failure_count = 0
+                logger.debug(f"凭证索引 {self.index} 请求成功，重置失败计数。")

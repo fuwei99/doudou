@@ -70,366 +70,325 @@ class DoubaoProvider(BaseProvider):
 
     async def _non_stream_completion(self, request_data: Dict[str, Any]) -> JSONResponse:
         """
-        处理非流式聊天补全请求。
+        处理非流式聊天补全请求，包含 3 次重试机制。
         """
-        session_id = request_data.get("user", f"session-{uuid.uuid4().hex}")
-        messages = request_data.get("messages", [])
-        user_model = request_data.get("model", settings.DEFAULT_MODEL)
+        last_exception = None
+        for attempt in range(3):
+            try:
+                session_id = request_data.get("user", f"session-{uuid.uuid4().hex}")
+                messages = request_data.get("messages", [])
+                user_model = request_data.get("model", settings.DEFAULT_MODEL)
 
-        bot_id = settings.MODEL_MAPPING.get(user_model)
-        if not bot_id:
-            raise HTTPException(status_code=400, detail=f"不支持的模型: {user_model}")
+                bot_id = settings.MODEL_MAPPING.get(user_model)
+                if not bot_id:
+                    raise HTTPException(status_code=400, detail=f"不支持的模型: {user_model}")
 
-        session_data = self.session_manager.get_session(session_id) or {}
-        conversation_id = session_data.get("conversation_id", "0")
-        is_new_conversation = conversation_id == "0"
+                session_data = self.session_manager.get_session(session_id) or {}
+                conversation_id = session_data.get("conversation_id", "0")
+                is_new_conversation = conversation_id == "0"
 
-        request_id = f"chatcmpl-{uuid.uuid4()}"
-        new_conversation_id = None
-        full_content = []
-        full_reasoning_content = []
-        is_thinking = False
-        streamed_any_data = False
+                request_id = f"chatcmpl-{uuid.uuid4()}"
+                new_conversation_id = None
+                full_content = []
+                full_reasoning_content = []
+                is_thinking = False
+                streamed_any_data = False
 
-        try:
-            base_cookie = self.credential_manager.get_credential()
-            final_cookie = self._get_dynamic_cookie(base_cookie)
-            base_url = "https://www.doubao.com/chat/completion"
-            base_params = {
-                "aid": "497858",
-                "device_id": settings.DOUBAO_DEVICE_ID or "7600236600187471401",
-                "device_platform": "web",
-                "fp": settings.DOUBAO_FP or "verify_mkxf3p9i_hUn2VGVE_y5cH_4yp9_BjK6_iNSvN3wCyROz",
-                "language": "zh",
-                "pc_version": "3.9.0",
-                "pkg_type": "release_version",
-                "real_aid": "497858",
-                "region": "",
-                "samantha_web": "1",
-                "sys_region": "",
-                "tea_uuid": settings.DOUBAO_TEA_UUID or "7468737889876035084",
-                "use-olympus-account": "1",
-                "version_code": "20800",
-                "web_id": settings.DOUBAO_WEB_ID or "7468737889876035084",
-                "web_tab_id": str(uuid.uuid4())
-            }
-            headers = self._prepare_headers(final_cookie)
-            payload = await self._prepare_payload(messages, bot_id, conversation_id, user_model, final_cookie)
+                base_cookie = self.credential_manager.get_credential()
+                final_cookie = self._get_dynamic_cookie(base_cookie)
+                base_url = "https://www.doubao.com/chat/completion"
+                base_params = {
+                    "aid": "497858",
+                    "device_id": settings.DOUBAO_DEVICE_ID or "7600236600187471401",
+                    "device_platform": "web",
+                    "fp": settings.DOUBAO_FP or "verify_mkxf3p9i_hUn2VGVE_y5cH_4yp9_BjK6_iNSvN3wCyROz",
+                    "language": "zh",
+                    "pc_version": "3.9.0",
+                    "pkg_type": "release_version",
+                    "real_aid": "497858",
+                    "region": "",
+                    "samantha_web": "1",
+                    "sys_region": "",
+                    "tea_uuid": settings.DOUBAO_TEA_UUID or "7468737889876035084",
+                    "use-olympus-account": "1",
+                    "version_code": "20800",
+                    "web_id": settings.DOUBAO_WEB_ID or "7468737889876035084",
+                    "web_tab_id": str(uuid.uuid4())
+                }
+                headers = self._prepare_headers(final_cookie)
+                payload = await self._prepare_payload(messages, bot_id, conversation_id, user_model, final_cookie)
 
-            log_headers = headers.copy()
-            log_headers["Cookie"] = "[REDACTED FOR SECURITY]"
-            logger.info("--- 准备向上游发送的完整请求包 (非流式) ---")
-            logger.info(f"请求方法: POST")
-            logger.info(f"基础URL: {base_url}")
-            logger.info(f"请求头 (Headers):\n{json.dumps(log_headers, indent=2)}")
-            logger.info(f"请求载荷 (Payload):\n{json.dumps(payload, indent=2, ensure_ascii=False)}")
-            logger.info("------------------------------------")
+                log_headers = headers.copy()
+                log_headers["Cookie"] = "[REDACTED FOR SECURITY]"
+                logger.info(f"--- [尝试 {attempt + 1}/3] 准备向上游发送请求 (非流式) ---")
+                
+                signed_url = await self.playwright_manager.get_signed_url(base_url, final_cookie, base_params)
+                if not signed_url:
+                    raise Exception("无法获取 a_bogus 签名, Playwright 服务可能异常。")
 
-            signed_url = await self.playwright_manager.get_signed_url(base_url, final_cookie, base_params)
-            if not signed_url:
-                raise Exception("无法获取 a_bogus 签名, Playwright 服务可能异常。")
+                async with self.client.stream("POST", signed_url, headers=headers, json=payload) as response:
+                    new_ms_token = response.headers.get("x-ms-token")
+                    if new_ms_token:
+                        self.playwright_manager.update_ms_token(new_ms_token)
 
-            logger.info(f"签名成功，最终请求 URL: {signed_url}")
+                    if response.status_code != 200:
+                        error_content = await response.aread()
+                        logger.error(f"上游服务器返回错误状态码: {response.status_code}")
+                        response.raise_for_status()
 
-            async with self.client.stream("POST", signed_url, headers=headers, json=payload) as response:
-                new_ms_token = response.headers.get("x-ms-token")
-                if new_ms_token:
-                    self.playwright_manager.update_ms_token(new_ms_token)
-                    logger.success(f"从响应头中捕获并更新了 msToken: {new_ms_token}")
-
-                if response.status_code != 200:
-                    error_content = await response.aread()
-                    logger.error(f"上游服务器返回错误状态码: {response.status_code}。")
-                    logger.error(f"上游服务器响应内容: {error_content.decode(errors='ignore')}")
-                    response.raise_for_status()
-
-                logger.success(f"成功连接到上游服务器, 状态码: {response.status_code}. 开始接收响应...")
-
-                current_event = None
-                async for line in response.aiter_lines():
-                    # [诊断日志] 打印从上游收到的每一行原始数据
-                    logger.info(f"上游原始响应行: {line}")
-                    streamed_any_data = True
-                    line = line.strip()
-                    if not line:
-                        continue
-                        
-                    if line.startswith("event:"):
-                        current_event = line[len("event:"):].strip()
-                        continue
-                        
-                    if line.startswith("data:"):
-                        content_str = line[len("data:"):].strip()
-                        if not content_str:
-                            continue
-
-                        try:
-                            data = json.loads(content_str)
-                            if current_event == "SSE_ACK" and not new_conversation_id:
-                                new_conversation_id = data.get("ack_client_meta", {}).get("conversation_id")
-                                if new_conversation_id:
-                                    logger.info(f"捕获到新会话 ID: {new_conversation_id}")
+                    current_event = None
+                    async for line in response.aiter_lines():
+                        streamed_any_data = True
+                        line = line.strip()
+                        if not line: continue
                             
-                            elif current_event == "STREAM_MSG_NOTIFY" or current_event == "STREAM_CHUNK":
-                                # Handle deep thinking status & image generation
-                                patch_ops = data.get("patch_op", [])
-                                if patch_ops:
-                                    for op in patch_ops:
-                                        patch_val = op.get("patch_value", {})
-                                        content_blocks = patch_val.get("content_block", [])
-                                        for block in content_blocks:
-                                            if block.get("block_type") == 10040:
-                                                is_finish = block.get("is_finish", False)
-                                                is_thinking = not is_finish
-                                        # 提取画图结果
-                                        image_urls = self._extract_image_urls(content_blocks)
-                                        for url in image_urls:
-                                            full_content.append(f"\n\n![图片]({url})")
-
-                                content_blocks = data.get("content", {}).get("content_block", [])
-                                for block in content_blocks:
-                                    if block.get("block_type") == 10040:
-                                        is_finish = block.get("is_finish", False)
-                                        is_thinking = not is_finish
-                                # 提取顶层画图结果
-                                image_urls = self._extract_image_urls(content_blocks)
-                                for url in image_urls:
-                                    full_content.append(f"\n\n![图片]({url})")
-
-                            elif current_event == "CHUNK_DELTA":
-                                delta_content = data.get("text", "")
-                                if delta_content:
-                                    if locals().get("is_thinking", False):
-                                        full_reasoning_content.append(delta_content)
-                                    else:
-                                        full_content.append(delta_content)
-                        except (json.JSONDecodeError, KeyError) as e:
-                            logger.warning(f"解析 SSE 数据块时跳过: {e}, 内容: {content_str}")
+                        if line.startswith("event:"):
+                            current_event = line[len("event:"):].strip()
                             continue
+                            
+                        if line.startswith("data:"):
+                            content_str = line[len("data:"):].strip()
+                            if not content_str: continue
 
-            if not streamed_any_data:
-                logger.error("上游服务器返回了 200 OK，但没有发送任何数据流。这通常是由于反爬虫策略触发。")
-                raise Exception("服务器连接成功但未返回数据流，请求可能被上游服务拦截。请检查Cookie是否过期或IP是否被限制。")
+                            try:
+                                data = json.loads(content_str)
+                                if current_event == "SSE_ACK" and not new_conversation_id:
+                                    new_conversation_id = data.get("ack_client_meta", {}).get("conversation_id")
+                                
+                                elif current_event == "STREAM_MSG_NOTIFY" or current_event == "STREAM_CHUNK":
+                                    patch_ops = data.get("patch_op", [])
+                                    if patch_ops:
+                                        for op in patch_ops:
+                                            block = op.get("patch_value", {}).get("content_block", [{}])[0]
+                                            if block.get("block_type") == 10040:
+                                                is_thinking = not block.get("is_finish", False)
+                                            # 简化的图片提取逻辑，减少非流式复杂度
+                                            image_urls = self._extract_image_urls(op.get("patch_value", {}).get("content_block", []))
+                                            for url in image_urls:
+                                                full_content.append(f"\n\n![图片]({url})")
 
-            if is_new_conversation and new_conversation_id:
-                self.session_manager.update_session(session_id, {"conversation_id": new_conversation_id})
-                logger.info(f"为用户 '{session_id}' 保存了新的会话 ID: {new_conversation_id}")
+                                    content_blocks = data.get("content", {}).get("content_block", [])
+                                    for block in content_blocks:
+                                        if block.get("block_type") == 10040:
+                                            is_thinking = not block.get("is_finish", False)
+                                    image_urls = self._extract_image_urls(content_blocks)
+                                    for url in image_urls:
+                                        full_content.append(f"\n\n![图片]({url})")
 
-            final_text = "".join(full_content)
-            final_reasoning_text = "".join(full_reasoning_content)
+                                elif current_event == "CHUNK_DELTA":
+                                    delta_content = data.get("text", "")
+                                    if delta_content:
+                                        if is_thinking:
+                                            full_reasoning_content.append(delta_content)
+                                        else:
+                                            full_content.append(delta_content)
+                            except Exception:
+                                continue
 
-            # 按照用户要求，将完整的响应内容打印到终端
-            print("\n--- [非流式] 完整响应内容 ---")
-            if final_reasoning_text:
-                print(f"[思考过程]:\n{final_reasoning_text}\n")
-            print(f"[回答内容]:\n{final_text}")
-            print("---------------------------------\n")
+                if not streamed_any_data:
+                    raise Exception("服务器连接成功但未返回数据流（空回），怀疑 Cookie 限制。")
 
-            message_data = {"role": "assistant", "content": final_text}
-            if final_reasoning_text:
-                message_data["reasoning_content"] = final_reasoning_text
+                # 成功处理，重置计数并保存会话
+                self.credential_manager.report_success()
+                
+                if is_new_conversation and new_conversation_id:
+                    self.session_manager.update_session(session_id, {"conversation_id": new_conversation_id})
 
-            response_data = {
-                "id": request_id,
-                "object": "chat.completion",
-                "created": int(time.time()),
-                "model": user_model,
-                "choices": [{
-                    "index": 0,
-                    "message": message_data,
-                    "finish_reason": "stop"
-                }],
-                "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
-            }
-            return JSONResponse(content=response_data)
+                final_text = "".join(full_content)
+                final_reasoning_text = "".join(full_reasoning_content)
 
-        except Exception as e:
-            logger.error(f"处理非流式请求时发生严重错误: {e}", exc_info=True)
-            return JSONResponse(
-                status_code=500,
-                content={"error": {"message": f"内部服务器错误: {str(e)}", "type": "server_error", "code": None}}
-            )
+                # 按照用户要求，将完整的响应内容打印到终端
+                print("\n--- [非流式] 完整响应内容 ---")
+                if final_reasoning_text:
+                    print(f"[思考过程]:\n{final_reasoning_text}\n")
+                print(f"[回答内容]:\n{final_text}")
+                print("---------------------------------\n")
+
+                message_data = {"role": "assistant", "content": final_text}
+                if final_reasoning_text:
+                    message_data["reasoning_content"] = final_reasoning_text
+
+                return JSONResponse(content={
+                    "id": request_id,
+                    "object": "chat.completion",
+                    "created": int(time.time()),
+                    "model": user_model,
+                    "choices": [{"index": 0, "message": message_data, "finish_reason": "stop"}],
+                    "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+                })
+
+            except Exception as e:
+                last_exception = e
+                self.credential_manager.report_failure()
+                logger.warning(f"第 {attempt + 1} 次尝试失败: {str(e)}")
+                if attempt < 2:
+                    await asyncio.sleep(1) # 重试前稍作等待
+                continue
+
+        # 如果走到这里，说明 3 次都失败了
+        logger.error(f"非流式请求在 3 次重试后仍然失败: {str(last_exception)}")
+        return JSONResponse(
+            status_code=500,
+            content={"error": {"message": f"经过3次重试后失败: {str(last_exception)}", "type": "server_error", "code": None}}
+        )
 
     async def _stream_generator(self, request_data: Dict[str, Any]) -> AsyncGenerator[bytes, None]:
         """
-        处理流式聊天补全请求。
+        处理流式聊天补全请求，包含重试机制。
+        注意：一旦开始 yield 数据给客户端，就无法再进行完整重试。
         """
         session_id = request_data.get("user", f"session-{uuid.uuid4().hex}")
         messages = request_data.get("messages", [])
         user_model = request_data.get("model", settings.DEFAULT_MODEL)
-
         bot_id = settings.MODEL_MAPPING.get(user_model)
-        if not bot_id:
-            # This should be handled before calling the generator, but as a safeguard:
-            error_chunk = create_chat_completion_chunk(f"chatcmpl-{uuid.uuid4()}", user_model, f"不支持的模型: {user_model}", "stop")
-            yield create_sse_data(error_chunk)
-            yield DONE_CHUNK
-            return
-
-        session_data = self.session_manager.get_session(session_id) or {}
-        conversation_id = session_data.get("conversation_id", "0")
-        is_new_conversation = conversation_id == "0"
-
         request_id = f"chatcmpl-{uuid.uuid4()}"
-        new_conversation_id = None
-        is_thinking = False
-        streamed_any_data = False
+        
+        last_exception = None
+        streamed_to_client = False  # 是否已经开始向请求方发送有效数据
 
-        try:
-            base_cookie = self.credential_manager.get_credential()
-            final_cookie = self._get_dynamic_cookie(base_cookie)
-            base_url = "https://www.doubao.com/chat/completion"
-            base_params = {
-                "aid": "497858",
-                "device_id": settings.DOUBAO_DEVICE_ID or "7600236600187471401",
-                "device_platform": "web",
-                "fp": settings.DOUBAO_FP or "verify_mkxf3p9i_hUn2VGVE_y5cH_4yp9_BjK6_iNSvN3wCyROz",
-                "language": "zh",
-                "pc_version": "3.9.0",
-                "pkg_type": "release_version",
-                "real_aid": "497858",
-                "region": "",
-                "samantha_web": "1",
-                "sys_region": "",
-                "tea_uuid": settings.DOUBAO_TEA_UUID or "7468737889876035084",
-                "use-olympus-account": "1",
-                "version_code": "20800",
-                "web_id": settings.DOUBAO_WEB_ID or "7468737889876035084",
-                "web_tab_id": str(uuid.uuid4())
-            }
-            headers = self._prepare_headers(final_cookie)
-            payload = await self._prepare_payload(messages, bot_id, conversation_id, user_model, final_cookie)
+        for attempt in range(3):
+            try:
+                if not bot_id:
+                    error_chunk = create_chat_completion_chunk(request_id, user_model, f"不支持的模型: {user_model}", "stop")
+                    yield create_sse_data(error_chunk)
+                    yield DONE_CHUNK
+                    return
 
-            log_headers = headers.copy()
-            log_headers["Cookie"] = "[REDACTED FOR SECURITY]"
-            logger.info("--- 准备向上游发送的完整请求包 (流式) ---")
-            logger.info(f"请求方法: POST")
-            logger.info(f"基础URL: {base_url}")
-            logger.info(f"请求头 (Headers):\n{json.dumps(log_headers, indent=2)}")
-            logger.info(f"请求载荷 (Payload):\n{json.dumps(payload, indent=2, ensure_ascii=False)}")
-            logger.info("------------------------------------")
+                session_data = self.session_manager.get_session(session_id) or {}
+                conversation_id = session_data.get("conversation_id", "0")
+                is_new_conversation = conversation_id == "0"
+                new_conversation_id = None
+                is_thinking = False
+                streamed_any_data = False
 
-            signed_url = await self.playwright_manager.get_signed_url(base_url, final_cookie, base_params)
-            if not signed_url:
-                raise Exception("无法获取 a_bogus 签名, Playwright 服务可能异常。")
+                base_cookie = self.credential_manager.get_credential()
+                final_cookie = self._get_dynamic_cookie(base_cookie)
+                base_url = "https://www.doubao.com/chat/completion"
+                base_params = {
+                    "aid": "497858",
+                    "device_id": settings.DOUBAO_DEVICE_ID or "7600236600187471401",
+                    "device_platform": "web",
+                    "fp": settings.DOUBAO_FP or "verify_mkxf3p9i_hUn2VGVE_y5cH_4yp9_BjK6_iNSvN3wCyROz",
+                    "language": "zh",
+                    "pc_version": "3.9.0",
+                    "pkg_type": "release_version",
+                    "real_aid": "497858",
+                    "region": "", "samantha_web": "1", "sys_region": "",
+                    "tea_uuid": settings.DOUBAO_TEA_UUID or "7468737889876035084",
+                    "use-olympus-account": "1", "version_code": "20800",
+                    "web_id": settings.DOUBAO_WEB_ID or "7468737889876035084",
+                    "web_tab_id": str(uuid.uuid4())
+                }
+                headers = self._prepare_headers(final_cookie)
+                payload = await self._prepare_payload(messages, bot_id, conversation_id, user_model, final_cookie)
 
-            logger.info(f"签名成功，最终请求 URL: {signed_url}")
+                logger.info(f"--- [尝试 {attempt + 1}/3] 准备向上游发送请求 (流式) ---")
+                
+                if attempt == 0:
+                    print("\n--- [流式] 响应内容 ---")
 
-            # 按照用户要求，在流式输出前打印一个标识
-            print("\n--- [流式] 响应内容 ---")
+                signed_url = await self.playwright_manager.get_signed_url(base_url, final_cookie, base_params)
+                if not signed_url:
+                    raise Exception("无法获取 a_bogus 签名")
 
-            async with self.client.stream("POST", signed_url, headers=headers, json=payload) as response:
-                new_ms_token = response.headers.get("x-ms-token")
-                if new_ms_token:
-                    self.playwright_manager.update_ms_token(new_ms_token)
-                    logger.success(f"从响应头中捕获并更新了 msToken: {new_ms_token}")
+                async with self.client.stream("POST", signed_url, headers=headers, json=payload) as response:
+                    if response.status_code != 200:
+                        response.raise_for_status()
 
-                if response.status_code != 200:
-                    error_content = await response.aread()
-                    logger.error(f"上游服务器返回错误状态码: {response.status_code}。")
-                    logger.error(f"上游服务器响应内容: {error_content.decode(errors='ignore')}")
-                    response.raise_for_status()
-
-                logger.success(f"成功连接到上游服务器, 状态码: {response.status_code}. 开始接收响应...")
-
-                current_event = None
-                async for line in response.aiter_lines():
-                    # [诊断日志] 打印从上游收到的每一行原始数据
-                    logger.info(f"上游原始响应行: {line}")
-                    streamed_any_data = True
-                    line = line.strip()
-                    if not line:
-                        continue
-                        
-                    if line.startswith("event:"):
-                        current_event = line[len("event:"):].strip()
-                        continue
-                        
-                    if line.startswith("data:"):
-                        content_str = line[len("data:"):].strip()
-                        if not content_str:
+                    current_event = None
+                    async for line in response.aiter_lines():
+                        streamed_any_data = True
+                        line = line.strip()
+                        if not line: continue
+                            
+                        if line.startswith("event:"):
+                            current_event = line[len("event:"):].strip()
                             continue
+                            
+                        if line.startswith("data:"):
+                            content_str = line[len("data:"):].strip()
+                            if not content_str: continue
 
-                        try:
-                            data = json.loads(content_str)
-                            if current_event == "SSE_ACK" and not new_conversation_id:
-                                new_conversation_id = data.get("ack_client_meta", {}).get("conversation_id")
-                                if new_conversation_id:
-                                    logger.info(f"捕获到新会话 ID: {new_conversation_id}")
-                                    
-                            elif current_event == "STREAM_MSG_NOTIFY" or current_event == "STREAM_CHUNK":
-                                # Handle deep thinking status & image generation
-                                patch_ops = data.get("patch_op", [])
-                                if patch_ops:
+                            try:
+                                data = json.loads(content_str)
+                                if current_event == "SSE_ACK" and not new_conversation_id:
+                                    new_conversation_id = data.get("ack_client_meta", {}).get("conversation_id")
+                                        
+                                elif current_event in ["STREAM_MSG_NOTIFY", "STREAM_CHUNK"]:
+                                    # 处理思考状态和图片逻辑
+                                    patch_ops = data.get("patch_op", [])
                                     for op in patch_ops:
-                                        patch_val = op.get("patch_value", {})
-                                        content_blocks = patch_val.get("content_block", [])
-                                        for block in content_blocks:
+                                        blocks = op.get("patch_value", {}).get("content_block", [])
+                                        for block in blocks:
                                             if block.get("block_type") == 10040:
-                                                is_finish = block.get("is_finish", False)
-                                                is_thinking = not is_finish
-                                        # 提取画图结果并流式输出
-                                        image_urls = self._extract_image_urls(content_blocks)
+                                                is_thinking = not block.get("is_finish", False)
+                                        image_urls = self._extract_image_urls(blocks)
                                         for url in image_urls:
                                             img_md = f"\n\n![图片]({url})"
-                                            print(img_md, end="", flush=True)
                                             chunk = create_chat_completion_chunk(request_id, user_model, content=img_md)
                                             yield create_sse_data(chunk)
+                                            streamed_to_client = True
 
-                                content_blocks = data.get("content", {}).get("content_block", [])
-                                for block in content_blocks:
-                                    if block.get("block_type") == 10040:
-                                        is_finish = block.get("is_finish", False)
-                                        is_thinking = not is_finish
-                                # 提取顶层画图结果并流式输出
-                                image_urls = self._extract_image_urls(content_blocks)
-                                for url in image_urls:
-                                    img_md = f"\n\n![图片]({url})"
-                                    print(img_md, end="", flush=True)
-                                    chunk = create_chat_completion_chunk(request_id, user_model, content=img_md)
-                                    yield create_sse_data(chunk)
+                                    content_blocks = data.get("content", {}).get("content_block", [])
+                                    for block in content_blocks:
+                                        if block.get("block_type") == 10040:
+                                            is_thinking = not block.get("is_finish", False)
+                                    image_urls = self._extract_image_urls(content_blocks)
+                                    for url in image_urls:
+                                        img_md = f"\n\n![图片]({url})"
+                                        chunk = create_chat_completion_chunk(request_id, user_model, content=img_md)
+                                        yield create_sse_data(chunk)
+                                        streamed_to_client = True
 
-                            elif current_event == "CHUNK_DELTA":
-                                delta_content = data.get("text", "")
-                                if delta_content:
-                                    # 按照用户要求，将流式数据块直接打印到终端
-                                    print(delta_content, end="", flush=True)
-                                    if locals().get("is_thinking", False):
-                                        chunk = create_chat_completion_chunk(request_id, user_model, content="", reasoning_content=delta_content)
-                                    else:
-                                        chunk = create_chat_completion_chunk(request_id, user_model, content=delta_content)
-                                    yield create_sse_data(chunk)
-                        except (json.JSONDecodeError, KeyError) as e:
-                            logger.warning(f"解析 SSE 数据块时跳过: {e}, 内容: {content_str}")
-                            continue
-            
-            # 在流式输出结束后打印换行符和结束标识
-            if streamed_any_data:
+                                elif current_event == "CHUNK_DELTA":
+                                    delta_content = data.get("text", "")
+                                    if delta_content:
+                                        print(delta_content, end="", flush=True)
+                                        if is_thinking:
+                                            chunk = create_chat_completion_chunk(request_id, user_model, content="", reasoning_content=delta_content)
+                                        else:
+                                            chunk = create_chat_completion_chunk(request_id, user_model, content=delta_content)
+                                        yield create_sse_data(chunk)
+                                        streamed_to_client = True
+                            except Exception:
+                                continue
+
+                if not streamed_any_data:
+                    raise Exception("上游未返回任何数据流（空回）")
+
+                # 成功结束
+                self.credential_manager.report_success()
                 print("\n--------------------------\n")
+                if is_new_conversation and new_conversation_id:
+                    self.session_manager.update_session(session_id, {"conversation_id": new_conversation_id})
 
-            if not streamed_any_data:
-                logger.error("上游服务器返回了 200 OK，但没有发送任何数据流。这通常是由于反爬虫策略触发。")
-                error_message = "服务器连接成功但未返回数据流，请求可能被上游服务拦截。请检查Cookie是否过期或IP是否被限制。"
-                error_chunk = create_chat_completion_chunk(request_id, user_model, error_message, "stop")
-                yield create_sse_data(error_chunk)
+                final_chunk = create_chat_completion_chunk(request_id, user_model, "", "stop")
+                yield create_sse_data(final_chunk)
                 yield DONE_CHUNK
-                return
+                return  # 正常退出循环
 
-            if is_new_conversation and new_conversation_id:
-                self.session_manager.update_session(session_id, {"conversation_id": new_conversation_id})
-                logger.info(f"为用户 '{session_id}' 保存了新的会话 ID: {new_conversation_id}")
-
-            final_chunk = create_chat_completion_chunk(request_id, user_model, "", "stop")
-            yield create_sse_data(final_chunk)
-            yield DONE_CHUNK
-
-        except Exception as e:
-            logger.error(f"处理流时发生严重错误: {e}", exc_info=True)
-            # 在流式输出结束后打印换行符和结束标识
-            print("\n--- [流式] 发生错误 ---\n")
-            error_chunk = create_chat_completion_chunk(request_id, user_model, f"内部服务器错误: {str(e)}", "stop")
-            yield create_sse_data(error_chunk)
-            yield DONE_CHUNK
+            except Exception as e:
+                last_exception = e
+                self.credential_manager.report_failure()
+                logger.warning(f"流式尝试 {attempt + 1} 失败: {str(e)}")
+                
+                if streamed_to_client:
+                    # 如果已经向客户端发过数据，不能再重试（会导致格式错误），直接补一个错误块
+                    logger.error("流式输出中途出错，无法重试。")
+                    error_chunk = create_chat_completion_chunk(request_id, user_model, f"\n\n[流式中途出错]: {str(e)}", "stop")
+                    yield create_sse_data(error_chunk)
+                    yield DONE_CHUNK
+                    return
+                
+                if attempt < 2:
+                    await asyncio.sleep(1)
+                    continue
+        
+        # 3次重试均失败且未输出过数据
+        error_msg = f"经过3次重试后失败: {str(last_exception)}"
+        logger.error(error_msg)
+        yield create_sse_data(create_chat_completion_chunk(request_id, user_model, error_msg, "stop"))
+        yield DONE_CHUNK
 
     def _extract_image_urls(self, content_blocks: list) -> list:
         """从 content_block 列表中提取 block_type=2074 已完成图片的原图 URL"""
