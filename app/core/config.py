@@ -40,6 +40,7 @@ class Settings(BaseSettings):
 
     # --- 上游 API 配置 ---
     API_REQUEST_TIMEOUT: int = 180
+    DOUBAO_PC_VERSION: str = "3.10.0"  # 关键：同步抓包版本
     
     # --- 会话管理 ---
     SESSION_CACHE_TTL: int = 3600

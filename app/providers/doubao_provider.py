@@ -106,7 +106,7 @@ class DoubaoProvider(BaseProvider):
                     "device_platform": "web",
                     "fp": cred_obj.get("fp") or settings.DOUBAO_FP or "verify_mkxf3p9i_hUn2VGVE_y5cH_4yp9_BjK6_iNSvN3wCyROz",
                     "language": "zh",
-                    "pc_version": "3.9.0",
+                    "pc_version": settings.DOUBAO_PC_VERSION,
                     "pkg_type": "release_version",
                     "real_aid": "497858",
                     "region": "", "samantha_web": "1", "sys_region": "",
@@ -153,20 +153,32 @@ class DoubaoProvider(BaseProvider):
 
                             try:
                                 data = json.loads(content_str)
+                                if "error_code" in data:
+                                    last_exception = Exception(f"豆包 API 错误: {data.get('error_code')} - {data.get('error_msg')}")
+                                    break # 跳出 aiter_lines，触发重试或失败
+
                                 if current_event == "SSE_ACK" and not new_conversation_id:
                                     new_conversation_id = data.get("ack_client_meta", {}).get("conversation_id")
                                 
                                 elif current_event == "STREAM_MSG_NOTIFY" or current_event == "STREAM_CHUNK":
+                                    # --- 核心改进：提取回复.txt 这种格式中的 model_content ---
+                                    content_obj = data.get("content", {})
+                                    m_content = content_obj.get("model_content")
+                                    if m_content:
+                                        full_content.append(m_content)
+                                        streamed_any_data = True
+
                                     patch_ops = data.get("patch_op", [])
                                     if patch_ops:
                                         for op in patch_ops:
                                             block = op.get("patch_value", {}).get("content_block", [{}])[0]
                                             if block.get("block_type") == 10040:
                                                 is_thinking = not block.get("is_finish", False)
-                                            # 简化的图片提取逻辑，减少非流式复杂度
+                                            # 提取图片
                                             image_urls = self._extract_image_urls(op.get("patch_value", {}).get("content_block", []))
                                             for url in image_urls:
                                                 full_content.append(f"\n\n![图片]({url})")
+                                                streamed_any_data = True
 
                                     content_blocks = data.get("content", {}).get("content_block", [])
                                     for block in content_blocks:
@@ -175,6 +187,7 @@ class DoubaoProvider(BaseProvider):
                                     image_urls = self._extract_image_urls(content_blocks)
                                     for url in image_urls:
                                         full_content.append(f"\n\n![图片]({url})")
+                                        streamed_any_data = True
 
                                 elif current_event == "CHUNK_DELTA":
                                     delta_content = data.get("text", "")
@@ -229,10 +242,17 @@ class DoubaoProvider(BaseProvider):
             self.credential_manager.report_failure()
 
         # 如果走到这里，说明 3 次都失败了
-        logger.error(f"非流式请求在 3 次重试后仍然失败: {str(last_exception)}")
+        error_info = str(last_exception)
+        logger.error(f"非流式请求在 3 次重试后仍然失败: {error_info}")
+        
+        # 提取 error_code 用于更友好的返回 (如果存在)
+        status_code = 500
+        if "710022004" in error_info:
+            status_code = 429 # Rate Limit
+            
         return JSONResponse(
-            status_code=500,
-            content={"error": {"message": f"经过3次重试后失败: {str(last_exception)}", "type": "server_error", "code": None}}
+            status_code=status_code,
+            content={"error": {"message": error_info, "type": "server_error", "code": None}}
         )
 
     async def _stream_generator(self, request_data: Dict[str, Any]) -> AsyncGenerator[bytes, None]:
@@ -276,7 +296,7 @@ class DoubaoProvider(BaseProvider):
                     "device_platform": "web",
                     "fp": cred_obj.get("fp") or settings.DOUBAO_FP or "verify_mkxf3p9i_hUn2VGVE_y5cH_4yp9_BjK6_iNSvN3wCyROz",
                     "language": "zh",
-                    "pc_version": "3.9.0",
+                    "pc_version": settings.DOUBAO_PC_VERSION,
                     "pkg_type": "release_version",
                     "real_aid": "497858",
                     "region": "", "samantha_web": "1", "sys_region": "",
@@ -324,10 +344,25 @@ class DoubaoProvider(BaseProvider):
 
                             try:
                                 data = json.loads(content_str)
+                                
+                                # 检查是否有 error_code
+                                if "error_code" in data:
+                                    last_exception = Exception(f"豆包 API 错误: {data.get('error_code')} - {data.get('error_msg')}")
+                                    raise last_exception # 让外层捕获重试
+
                                 if current_event == "SSE_ACK" and not new_conversation_id:
                                     new_conversation_id = data.get("ack_client_meta", {}).get("conversation_id")
                                         
                                 elif current_event in ["STREAM_MSG_NOTIFY", "STREAM_CHUNK"]:
+                                    # --- 核心改进：支持 model_content 提取 ---
+                                    content_obj = data.get("content", {})
+                                    m_content = content_obj.get("model_content")
+                                    if m_content:
+                                        print(m_content, end="", flush=True)
+                                        chunk = create_chat_completion_chunk(request_id, user_model, content=m_content)
+                                        yield create_sse_data(chunk)
+                                        streamed_to_client = True
+
                                     # 处理思考状态和图片逻辑
                                     patch_ops = data.get("patch_op", [])
                                     for op in patch_ops:
@@ -426,9 +461,9 @@ class DoubaoProvider(BaseProvider):
             "Accept": "*/*", "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
             "Content-Type": "application/json", "Cookie": cookie,
             "Origin": "https://www.doubao.com", "Referer": "https://www.doubao.com/chat/",
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36",
             "agw-js-conv": "str, str",
-            "sec-ch-ua": '"Google Chrome";v="141", "Not?A_Brand";v="8", "Chromium";v="141"',
+            "sec-ch-ua": '"Not:A-Brand";v="99", "Google Chrome";v="145", "Chromium";v="145"',
             "sec-ch-ua-mobile": "?0", "sec-ch-ua-platform": '"Windows"',
             "sec-fetch-dest": "empty", "sec-fetch-mode": "cors", "sec-fetch-site": "same-origin",
             "x-flow-trace": f"04-{uuid.uuid4().hex}-{uuid.uuid4().hex[:16]}-01", # 模拟官方链路追踪头

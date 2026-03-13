@@ -206,9 +206,8 @@ class PlaywrightManager:
                     final_params['web_tab_id'] = str(uuid.uuid4())
                     
                 if self.ms_token:
-                    # 如果 Provider 没传最新的 msToken，则补上
-                    if 'msToken' not in final_params:
-                        final_params['msToken'] = self.ms_token
+                    # 始终同步 Playwright 侧捕获的最新的 msToken，这对成功生成 a_bogus 至关重要
+                    final_params['msToken'] = self.ms_token
                 else:
                     logger.error("msToken 未被初始化，无法构建有效请求！")
                     return None
