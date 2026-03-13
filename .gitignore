@@ -5,6 +5,7 @@
 reference/
 cookies/
 cookies.json
+cookies.js
 test/
 
 # Python
