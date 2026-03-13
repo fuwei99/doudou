@@ -117,7 +117,7 @@ class DoubaoProvider(BaseProvider):
                     "msToken": self.playwright_manager.ms_token # 同步 URL 里的 msToken
                 }
                 headers = self._prepare_headers(final_cookie)
-                payload = await self._prepare_payload(messages, bot_id, conversation_id, user_model, final_cookie)
+                payload = await self._prepare_payload(messages, bot_id, conversation_id, user_model, cred_obj, final_cookie)
 
                 log_headers = headers.copy()
                 log_headers["Cookie"] = "[REDACTED FOR SECURITY]"
@@ -159,8 +159,21 @@ class DoubaoProvider(BaseProvider):
                                     logger.error(str(last_exception))
                                     raise last_exception # 改为抛出，而不是 break，确保能被捕获
 
-                                if current_event == "SSE_ACK" and not new_conversation_id:
-                                    new_conversation_id = data.get("ack_client_meta", {}).get("conversation_id")
+                                if current_event == "SSE_ACK":
+                                    ack_meta = data.get("ack_client_meta", {})
+                                    new_conversation_id = ack_meta.get("conversation_id")
+                                    
+                                    # --- 关键: 捕获用于 Edit 模式的 Question ID ---
+                                    query_list = data.get("query_list", [])
+                                    if query_list and new_conversation_id:
+                                        server_query_id = query_list[0].get("question_id")
+                                        if server_query_id:
+                                            logger.success(f"捕获到持久化 ID: Conv={new_conversation_id}, Query={server_query_id}")
+                                            self.credential_manager.update_persistence(
+                                                cred_obj["cookie"], 
+                                                new_conversation_id, 
+                                                server_query_id
+                                            )
                                 
                                 elif current_event == "STREAM_MSG_NOTIFY" or current_event == "STREAM_CHUNK":
                                     packet_extracted_text = False # 单包内去重标志
@@ -347,7 +360,7 @@ class DoubaoProvider(BaseProvider):
                     "msToken": self.playwright_manager.ms_token # 同步到 URL
                 }
                 headers = self._prepare_headers(final_cookie)
-                payload = await self._prepare_payload(messages, bot_id, conversation_id, user_model, final_cookie)
+                payload = await self._prepare_payload(messages, bot_id, conversation_id, user_model, cred_obj, final_cookie)
 
                 logger.info(f"--- [尝试 {attempt + 1}/3] 准备向上游发送请求 (流式) ---")
                 
@@ -390,8 +403,21 @@ class DoubaoProvider(BaseProvider):
                                     last_exception = Exception(f"豆包 API 错误: {data.get('error_code')} - {data.get('error_msg')}")
                                     raise last_exception # 让外层捕获重试
 
-                                if current_event == "SSE_ACK" and not new_conversation_id:
-                                    new_conversation_id = data.get("ack_client_meta", {}).get("conversation_id")
+                                if current_event == "SSE_ACK":
+                                    ack_meta = data.get("ack_client_meta", {})
+                                    new_conversation_id = ack_meta.get("conversation_id")
+                                    
+                                    # --- 关键: 捕获用于 Edit 模式的 Question ID (持久化) ---
+                                    query_list = data.get("query_list", [])
+                                    if query_list and new_conversation_id:
+                                        server_query_id = query_list[0].get("question_id")
+                                        if server_query_id:
+                                            logger.success(f"捕获到持久化 ID: Conv={new_conversation_id}, Query={server_query_id}")
+                                            self.credential_manager.update_persistence(
+                                                cred_obj["cookie"], 
+                                                new_conversation_id, 
+                                                server_query_id
+                                            )
                                         
                                 elif current_event in ["STREAM_MSG_NOTIFY", "STREAM_CHUNK"]:
                                     packet_extracted_text = False # 单包内去重
@@ -551,7 +577,7 @@ class DoubaoProvider(BaseProvider):
             "x-flow-trace": f"04-{uuid.uuid4().hex}-{uuid.uuid4().hex[:16]}-01", # 模拟官方链路追踪头
         }
 
-    async def _prepare_payload(self, messages: List[Dict[str, Any]], bot_id: str, conversation_id: str, user_model: str, cookie: str) -> Dict[str, Any]:
+    async def _prepare_payload(self, messages: List[Dict[str, Any]], bot_id: str, conversation_id: str, user_model: str, cred_obj: Dict[str, Any], final_cookie: str) -> Dict[str, Any]:
         """
         构造发送给上游豆包 API 的核心 Payload。
         支持多模态输入（检测最后一条消息中的图片）。
@@ -571,11 +597,20 @@ class DoubaoProvider(BaseProvider):
                     img_url = item.get("image_url", {}).get("url")
                     if img_url:
                         logger.info(f"检测到输入图片，正在上传...")
-                        upload_result = await self.file_uploader.upload(img_url, cookie, resource_type=2)
+                        upload_result = await self.file_uploader.upload(img_url, final_cookie, resource_type=2)
                         if upload_result:
                             image_uris.append(upload_result["uri"])
                             logger.success(f"图片上传成功: {upload_result['uri']}")
 
+        # --- 核心逻辑: 检查是否有固定的会话和查询 ID (单对话无限 Edit 模式) ---
+        pinned_conv_id = cred_obj.get("pinned_conversation_id")
+        pinned_query_id = cred_obj.get("pinned_query_id")
+        is_edit_mode = bool(pinned_conv_id and pinned_query_id)
+
+        if is_edit_mode:
+            logger.info(f"检测到永久会话配置，将进入 [Edit 模式] 覆盖消息: {pinned_query_id}")
+            conversation_id = pinned_conv_id
+        
         local_conv_id = f"local_{uuid.uuid4().hex}"
         local_msg_id = str(uuid.uuid4())
         
@@ -637,7 +672,7 @@ class DoubaoProvider(BaseProvider):
                 f"{prompt_to_file}\n\n"
                 f"<documents count=\"1\"><document id=\"2\"><type>文档</type><name>null.txt</name><content><![CDATA["
             )
-            file_result = await self.file_uploader.upload_text(injected_prompt, cookie)
+            file_result = await self.file_uploader.upload_text(injected_prompt, final_cookie)
             if file_result:
                 file_attachments.append({
                     "type": 3,
@@ -722,19 +757,19 @@ class DoubaoProvider(BaseProvider):
                 "click_clear_context": False,
                 "from_suggest": False,
                 "is_regen": False,
-                "is_replace": False,
+                "is_replace": is_edit_mode,
                 "disable_sse_cache": False,
                 "select_text_action": "",
                 "resend_for_regen": False,
                 "scene_type": 0,
                 "unique_key": str(uuid.uuid4()),
                 "start_seq": 0,
-                "need_create_conversation": conversation_id == "0",
+                "need_create_conversation": not is_edit_mode and conversation_id == "0",
                 "conversation_init_option": {
                     "need_ack_conversation": True
                 },
                 "regen_query_id": [],
-                "edit_query_id": [],
+                "edit_query_id": [pinned_query_id] if is_edit_mode else [],
                 "regen_instruction": "",
                 "no_replace_for_regen": False,
                 "message_from": 0,

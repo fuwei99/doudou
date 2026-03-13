@@ -165,3 +165,65 @@ class CredentialManager:
             if self.failure_count > 0:
                 self.failure_count = 0
                 logger.debug(f"凭证索引 {self.index} 请求成功，重置失败计数。")
+
+    def update_persistence(self, cookie: str, conversation_id: str, query_id: str):
+        """将捕获到的固定对话 ID 和查询 ID 回写到本地持久化存储中"""
+        with self.lock:
+            # 1. 更新内存状态 (确保内存里是最新的，这样下次请求即便不重启也能用)
+            target_cred = None
+            for cred in self.credentials:
+                if cred.get("cookie") == cookie:
+                    cred["pinned_conversation_id"] = conversation_id
+                    cred["pinned_query_id"] = query_id
+                    target_cred = cred
+                    break
+            
+            if not target_cred:
+                logger.warning("内存凭据列表中未发现匹配的 Cookie，放弃持久化。")
+                return
+
+            # 2. 持久化到 JSON 文件
+            json_path = os.path.join(os.getcwd(), "cookies.json")
+            try:
+                data = []
+                if os.path.exists(json_path):
+                    try:
+                        with open(json_path, "r", encoding="utf-8") as f:
+                            content = f.read().strip()
+                            if content:
+                                data = json.loads(content)
+                    except Exception as e:
+                        logger.warning(f"读取旧的 cookies.json 出错，将尝试备份覆盖: {e}")
+                
+                if not isinstance(data, list):
+                    data = []
+
+                # 寻找匹配项并更新
+                found_in_file = False
+                for item in data:
+                    # 匹配逻辑：优先用 cookie 字符串匹配，兼容性更好
+                    orig_cookie = target_cred.get("cookie", "").strip()
+                    if item.get("cookie") == orig_cookie:
+                        item["pinned_conversation_id"] = conversation_id
+                        item["pinned_query_id"] = query_id
+                        # 顺便同步指纹，防止 .env 里的指纹没存进 json
+                        for key in ["device_id", "fp", "web_id", "tea_uuid"]:
+                            if target_cred.get(key):
+                                item[key] = target_cred[key]
+                        found_in_file = True
+                        break
+                
+                if not found_in_file:
+                    # 如果文件中没有（说明是来自 .env 的），则将内存中的完整对象（含指纹和固定ID）存入文件
+                    new_item = target_cred.copy()
+                    data.append(new_item)
+                    logger.info("已将环境变量中的凭证正式固化到 cookies.json 文件中。")
+                
+                # 显式尝试新建文件并写入
+                with open(json_path, "w", encoding="utf-8") as f:
+                    json.dump(data, f, indent=2, ensure_ascii=False)
+                
+                logger.success(f"持久化成功! 永久 ID 已绑定 (Conv: {conversation_id[:8]})")
+                
+            except Exception as e:
+                logger.error(f"回写持久化文件失败: {e}")
