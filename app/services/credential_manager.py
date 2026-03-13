@@ -41,8 +41,6 @@ class CredentialManager:
         standard_creds.extend([self._augment_with_url_params(c) for c in json_creds])
         
         # 高级去重逻辑
-        unique_list = []
-        # 使用字典缓存，cookie 字符串作为 key，value 是最完整的那个凭证对象
         dedup_map = {}
         
         for item in standard_creds:
@@ -52,11 +50,19 @@ class CredentialManager:
             if cookie_key not in dedup_map:
                 dedup_map[cookie_key] = item
             else:
-                # 优先级竞争：如果新条目比旧条目多了设备信息，则替换它
+                # 优先级竞争逻辑 (得分制)
                 existing = dedup_map[cookie_key]
-                # 简单判断：如果现有条目没 fp 但新条目有，就换新的
-                if not existing.get("fp") and item.get("fp"):
+                
+                def get_score(cred):
+                    score = 0
+                    if cred.get("pinned_conversation_id"): score += 100  # 有固定 ID 最牛
+                    if cred.get("fp"): score += 10                     # 有环境指纹次之
+                    if cred.get("request_url"): score += 1             # 有原始 URL 再次之
+                    return score
+
+                if get_score(item) > get_score(existing):
                     dedup_map[cookie_key] = item
+                    logger.debug(f"凭证去重：发现更完整的凭证版本，已替换。")
         
         return list(dedup_map.values())
 
