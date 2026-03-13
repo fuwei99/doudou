@@ -155,40 +155,63 @@ class DoubaoProvider(BaseProvider):
                                 data = json.loads(content_str)
                                 if "error_code" in data:
                                     last_exception = Exception(f"豆包 API 错误: {data.get('error_code')} - {data.get('error_msg')}")
-                                    break # 跳出 aiter_lines，触发重试或失败
+                                    # 立即打印错误，方便调试
+                                    logger.error(str(last_exception))
+                                    raise last_exception # 改为抛出，而不是 break，确保能被捕获
 
                                 if current_event == "SSE_ACK" and not new_conversation_id:
                                     new_conversation_id = data.get("ack_client_meta", {}).get("conversation_id")
                                 
                                 elif current_event == "STREAM_MSG_NOTIFY" or current_event == "STREAM_CHUNK":
-                                    # --- 核心改进：提取回复.txt 这种格式中的 model_content ---
+                                    packet_extracted_text = False # 单包内去重标志
+
+                                    # --- 优先从 model_content 提取 ---
                                     content_obj = data.get("content", {})
                                     m_content = content_obj.get("model_content")
                                     if m_content:
                                         full_content.append(m_content)
                                         streamed_any_data = True
+                                        packet_extracted_text = True
 
+                                    # --- 处理补丁操作 (patch_op) ---
                                     patch_ops = data.get("patch_op", [])
                                     if patch_ops:
                                         for op in patch_ops:
-                                            block = op.get("patch_value", {}).get("content_block", [{}])[0]
-                                            if block.get("block_type") == 10040:
-                                                is_thinking = not block.get("is_finish", False)
+                                            blocks = op.get("patch_value", {}).get("content_block", [])
+                                            # 先更新一次思考状态
+                                            for block in blocks:
+                                                if block.get("block_type") == 10040:
+                                                    is_thinking = not block.get("is_finish", False)
+
+                                            for block in blocks:
+                                                if block.get("block_type") == 10000:
+                                                    txt = block.get("content", {}).get("text_block", {}).get("text")
+                                                    if txt and not packet_extracted_text:
+                                                        if is_thinking:
+                                                            full_reasoning_content.append(txt)
+                                                        else:
+                                                            full_content.append(txt)
+                                                        streamed_any_data = True
+                                                        packet_extracted_text = True
+                                            
                                             # 提取图片
-                                            image_urls = self._extract_image_urls(op.get("patch_value", {}).get("content_block", []))
+                                            image_urls = self._extract_image_urls(blocks)
                                             for url in image_urls:
                                                 full_content.append(f"\n\n![图片]({url})")
                                                 streamed_any_data = True
 
+                                    # --- 处理普通 content_block (如果补丁和 model_content 没给文字) ---
                                     content_blocks = data.get("content", {}).get("content_block", [])
                                     for block in content_blocks:
-                                        # 提取文字块 (针对 refer.txt 这种拦截场景)
+                                        # 提取文字块 (针对特定拦截或首包场景)
                                         if block.get("block_type") == 10000:
                                             txt = block.get("content", {}).get("text_block", {}).get("text")
-                                            if txt:
+                                            if txt and not packet_extracted_text:
                                                 full_content.append(txt)
                                                 streamed_any_data = True
-                                        # 提取思考状态
+                                                packet_extracted_text = True
+                                        
+                                        # 持续追踪思考状态
                                         if block.get("block_type") == 10040:
                                             is_thinking = not block.get("is_finish", False)
                                             
@@ -204,10 +227,19 @@ class DoubaoProvider(BaseProvider):
                                             full_reasoning_content.append(delta_content)
                                         else:
                                             full_content.append(delta_content)
-                            except Exception:
+                            except json.JSONDecodeError:
+                                continue
+                            except Exception as e:
+                                logger.error(f"解析 SSE 数据时发生意外错误: {str(e)}")
+                                # 遇到这种错误，如果是我们主动抛出的 business 异常，就不应该被吞掉
+                                if "豆包 API 错误" in str(e):
+                                    raise e
                                 continue
 
                 if not streamed_any_data:
+                    # 如果是因为检测到 error_code 跳出的，last_exception 会被设置
+                    if last_exception:
+                        raise last_exception
                     raise Exception("服务器连接成功但未返回数据流（空回），怀疑 Cookie 限制。")
 
                 # 成功处理，重置计数并保存会话
@@ -362,7 +394,9 @@ class DoubaoProvider(BaseProvider):
                                     new_conversation_id = data.get("ack_client_meta", {}).get("conversation_id")
                                         
                                 elif current_event in ["STREAM_MSG_NOTIFY", "STREAM_CHUNK"]:
-                                    # --- 核心改进：支持 model_content 提取 ---
+                                    packet_extracted_text = False # 单包内去重
+
+                                    # --- 优先从 model_content 提取 ---
                                     content_obj = data.get("content", {})
                                     m_content = content_obj.get("model_content")
                                     if m_content:
@@ -370,14 +404,32 @@ class DoubaoProvider(BaseProvider):
                                         chunk = create_chat_completion_chunk(request_id, user_model, content=m_content)
                                         yield create_sse_data(chunk)
                                         streamed_to_client = True
+                                        packet_extracted_text = True
 
-                                    # 处理思考状态和图片逻辑
+                                    # --- 处理补丁操作 (patch_op) ---
                                     patch_ops = data.get("patch_op", [])
                                     for op in patch_ops:
                                         blocks = op.get("patch_value", {}).get("content_block", [])
+                                        # 优先更新思考状态
                                         for block in blocks:
                                             if block.get("block_type") == 10040:
                                                 is_thinking = not block.get("is_finish", False)
+
+                                        for block in blocks:
+                                            # 核心修复：提取 patch 里的文字块（需区分思考中还是回答中）
+                                            if block.get("block_type") == 10000:
+                                                txt = block.get("content", {}).get("text_block", {}).get("text")
+                                                if txt and not packet_extracted_text:
+                                                    print(txt, end="", flush=True)
+                                                    if is_thinking:
+                                                        chunk = create_chat_completion_chunk(request_id, user_model, content="", reasoning_content=txt)
+                                                    else:
+                                                        chunk = create_chat_completion_chunk(request_id, user_model, content=txt)
+                                                    yield create_sse_data(chunk)
+                                                    streamed_to_client = True
+                                                    packet_extracted_text = True
+                                                
+                                        # 处理图片逻辑
                                         image_urls = self._extract_image_urls(blocks)
                                         for url in image_urls:
                                             img_md = f"\n\n![图片]({url})"
@@ -385,16 +437,18 @@ class DoubaoProvider(BaseProvider):
                                             yield create_sse_data(chunk)
                                             streamed_to_client = True
 
+                                    # --- 处理普通 content_block (兜底文字) ---
                                     content_blocks = data.get("content", {}).get("content_block", [])
                                     for block in content_blocks:
-                                        # 核心修复：提取文字块 (针对 refer.txt 这种拦截场景)
+                                        # 提取文字块
                                         if block.get("block_type") == 10000:
                                             txt = block.get("content", {}).get("text_block", {}).get("text")
-                                            if txt:
+                                            if txt and not packet_extracted_text:
                                                 print(txt, end="", flush=True)
                                                 chunk = create_chat_completion_chunk(request_id, user_model, content=txt)
                                                 yield create_sse_data(chunk)
                                                 streamed_to_client = True
+                                                packet_extracted_text = True
                                         
                                         # 提取思考状态
                                         if block.get("block_type") == 10040:
@@ -417,10 +471,19 @@ class DoubaoProvider(BaseProvider):
                                             chunk = create_chat_completion_chunk(request_id, user_model, content=delta_content)
                                         yield create_sse_data(chunk)
                                         streamed_to_client = True
-                            except Exception:
+                            except json.JSONDecodeError:
+                                continue
+                            except Exception as e:
+                                # 确保业务错误被抛出到外层重试逻辑
+                                if "豆包 API 错误" in str(e):
+                                    raise e
+                                logger.error(f"解析流式数据出错: {str(e)}")
                                 continue
 
                 if not streamed_to_client:
+                    # 如果已经记录了 API 错误，优先抛出
+                    if last_exception:
+                        raise last_exception
                     # 无论是否是新会话，只要没产生实际输出，通通重试。
                     # 如果上游是因为审查拦截没吐字，重试 3 次后也会返回错误信息给用户。
                     raise Exception("上游服务器响应成功但未返回有效文字内容")
