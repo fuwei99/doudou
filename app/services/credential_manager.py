@@ -3,6 +3,7 @@ import os
 import glob
 import json
 from typing import List, Dict, Any, Union
+from urllib.parse import urlparse, parse_qs
 from loguru import logger
 
 class CredentialManager:
@@ -33,11 +34,11 @@ class CredentialManager:
 
         # 3. 从环境变量 DOUBAO_COOKIES_JSON 加载
         env_json_creds = self._load_from_env_json()
-        standard_creds.extend(env_json_creds)
+        standard_creds.extend([self._augment_with_url_params(c) for c in env_json_creds])
 
         # 4. 从 cookies.json 加载 (全家桶模式)
         json_creds = self._load_from_json()
-        standard_creds.extend(json_creds)
+        standard_creds.extend([self._augment_with_url_params(c) for c in json_creds])
         
         # 高级去重逻辑
         unique_list = []
@@ -107,6 +108,42 @@ class CredentialManager:
                 logger.error(f"读取 Cookie 文件失败 {file_path}: {e}")
         
         return creds
+
+    def _augment_with_url_params(self, item: Dict[str, Any]) -> Dict[str, Any]:
+        """如果提供了 request_url，自动从中解析指纹参数"""
+        url = item.get("request_url")
+        if not url:
+            return item
+            
+        try:
+            parsed_url = urlparse(url)
+            params = parse_qs(parsed_url.query)
+            
+            # 自动映射关键字段
+            mappings = {
+                "device_id": "device_id",
+                "fp": "fp",
+                "web_id": "web_id",
+                "tea_uuid": "tea_uuid",
+                "msToken": "msToken"
+            }
+            
+            extracted_count = 0
+            for param_key, obj_key in mappings.items():
+                if param_key in params and params[param_key]:
+                    # 如果原对象里没有，或者 URL 里的更新，则填充
+                    val = params[param_key][0]
+                    if val:
+                        item[obj_key] = val
+                        extracted_count += 1
+            
+            if extracted_count > 0:
+                logger.success(f"自动从 request_url 中提取了 {extracted_count} 个指纹参数。")
+                
+        except Exception as e:
+            logger.warning(f"从 request_url 解析参数失败: {e}")
+            
+        return item
 
     def get_credential(self) -> Dict[str, Any]:
         """获取当前正在使用的设备凭证 (锁定当前账号)"""

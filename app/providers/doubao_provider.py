@@ -182,8 +182,16 @@ class DoubaoProvider(BaseProvider):
 
                                     content_blocks = data.get("content", {}).get("content_block", [])
                                     for block in content_blocks:
+                                        # 提取文字块 (针对 refer.txt 这种拦截场景)
+                                        if block.get("block_type") == 10000:
+                                            txt = block.get("content", {}).get("text_block", {}).get("text")
+                                            if txt:
+                                                full_content.append(txt)
+                                                streamed_any_data = True
+                                        # 提取思考状态
                                         if block.get("block_type") == 10040:
                                             is_thinking = not block.get("is_finish", False)
+                                            
                                     image_urls = self._extract_image_urls(content_blocks)
                                     for url in image_urls:
                                         full_content.append(f"\n\n![图片]({url})")
@@ -379,8 +387,19 @@ class DoubaoProvider(BaseProvider):
 
                                     content_blocks = data.get("content", {}).get("content_block", [])
                                     for block in content_blocks:
+                                        # 核心修复：提取文字块 (针对 refer.txt 这种拦截场景)
+                                        if block.get("block_type") == 10000:
+                                            txt = block.get("content", {}).get("text_block", {}).get("text")
+                                            if txt:
+                                                print(txt, end="", flush=True)
+                                                chunk = create_chat_completion_chunk(request_id, user_model, content=txt)
+                                                yield create_sse_data(chunk)
+                                                streamed_to_client = True
+                                        
+                                        # 提取思考状态
                                         if block.get("block_type") == 10040:
                                             is_thinking = not block.get("is_finish", False)
+                                            
                                     image_urls = self._extract_image_urls(content_blocks)
                                     for url in image_urls:
                                         img_md = f"\n\n![图片]({url})"
