@@ -196,9 +196,8 @@ class PlaywrightManager:
                 logger.info("正在使用 Playwright 生成 a_bogus 签名...")
                 
                 final_params = base_params.copy()
-                final_params.update(self.static_device_fingerprint)
+                # 核心修复: 不再使用全局静态指纹覆盖，尊重 Provider 传进来的个性化指纹
                 
-                final_params['web_tab_id'] = str(uuid.uuid4())
                 if self.ms_token:
                     final_params['msToken'] = self.ms_token
                 else:
