@@ -196,10 +196,19 @@ class PlaywrightManager:
                 logger.info("正在使用 Playwright 生成 a_bogus 签名...")
                 
                 final_params = base_params.copy()
-                # 核心修复: 不再使用全局静态指纹覆盖，尊重 Provider 传进来的个性化指纹
                 
+                # 指纹合并逻辑：优先使用传入的指纹，缺失才用默认的
+                for k, v in self.static_device_fingerprint.items():
+                    if k not in final_params or not final_params[k]:
+                        final_params[k] = v
+                
+                if 'web_tab_id' not in final_params:
+                    final_params['web_tab_id'] = str(uuid.uuid4())
+                    
                 if self.ms_token:
-                    final_params['msToken'] = self.ms_token
+                    # 如果 Provider 没传最新的 msToken，则补上
+                    if 'msToken' not in final_params:
+                        final_params['msToken'] = self.ms_token
                 else:
                     logger.error("msToken 未被初始化，无法构建有效请求！")
                     return None
@@ -209,7 +218,7 @@ class PlaywrightManager:
                 final_query_string = urlencode(sorted_params)
                 url_with_params = f"{base_url}?{final_query_string}"
 
-                logger.info(f"正在使用静态指纹和排序后的参数调用 window.bdms.frontierSign: \"{final_query_string}\"")
+                logger.info(f"正在使用设备指纹和排序后的参数调用 window.bdms.frontierSign: \"{final_query_string}\"")
                 signature_obj = await self.page.evaluate(f'window.bdms.frontierSign("{final_query_string}")')
                 
                 if isinstance(signature_obj, dict) and ('a_bogus' in signature_obj or 'X-Bogus' in signature_obj):
