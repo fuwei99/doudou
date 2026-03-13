@@ -4,6 +4,7 @@
 # Project specific ignores
 reference/
 cookies/
+cookies.json
 test/
 
 # Python

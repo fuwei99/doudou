@@ -3,7 +3,7 @@ import asyncio
 import json
 import uuid
 import os
-from typing import Optional, Dict, List
+from typing import Optional, Dict, List, Any
 from urllib.parse import urlencode, urlparse
 
 from playwright_stealth import stealth_async
@@ -46,7 +46,7 @@ class PlaywrightManager:
             cls._instance._initialized = False
         return cls._instance
 
-    async def initialize(self, cookies: List[str]):
+    async def initialize(self, credentials: List[Dict[str, Any]]):
         if self._initialized:
             return
         async with self._lock:
@@ -86,11 +86,14 @@ class PlaywrightManager:
 
             self.page.on("response", _handle_response)
 
-            if not cookies:
-                raise ValueError("Playwright 初始化需要至少一个有效的 Cookie。")
+            if not credentials:
+                raise ValueError("Playwright 初始化需要至少一个有效的凭证。")
             
             logger.info("正在为初始页面加载设置 Cookie...")
-            initial_cookie_str = cookies[0]
+            # 从第一个凭证对象中提取 cookie 字符串
+            initial_cred = credentials[0]
+            initial_cookie_str = initial_cred.get("cookie", "")
+            
             try:
                 cookie_list = [
                     {"name": c.split('=')[0].strip(), "value": c.split('=', 1)[1].strip(), "domain": ".doubao.com", "path": "/"}
@@ -98,8 +101,8 @@ class PlaywrightManager:
                 ]
                 await self.page.context.add_cookies(cookie_list)
                 logger.success("初始 Cookie 设置完成。")
-            except IndexError as e:
-                logger.error(f"解析 Cookie 时出错: '{initial_cookie_str}'. 请确保 Cookie 格式正确。错误: {e}")
+            except Exception as e:
+                logger.error(f"解析 Cookie 时出错: '{initial_cookie_str[:50]}...'. 错误: {e}")
                 raise ValueError("Cookie 格式无效，无法进行初始化。") from e
 
             try:

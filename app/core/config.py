@@ -28,6 +28,7 @@ class Settings(BaseSettings):
     
     # --- Doubao 凭证 ---
     DOUBAO_COOKIES: List[str] = []
+    DOUBAO_COOKIES_JSON: Optional[str] = None
 
     # --- 核心变更: 静态设备指纹配置 ---
     # 从您提供的有效请求中提取的静态设备指纹，这比动态嗅探稳定得多

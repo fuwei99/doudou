@@ -1,4 +1,4 @@
-# /app/providers/doubao_provider.py
+import asyncio
 import json
 import re
 import time
@@ -94,26 +94,27 @@ class DoubaoProvider(BaseProvider):
                 is_thinking = False
                 streamed_any_data = False
 
-                base_cookie = self.credential_manager.get_credential()
-                final_cookie = self._get_dynamic_cookie(base_cookie)
+                cred_obj = self.credential_manager.get_credential()
+                final_cookie = self._get_dynamic_cookie(cred_obj["cookie"])
                 base_url = "https://www.doubao.com/chat/completion"
+                
+                # 动态获取当前 Cookie 对应的指纹
+                web_tab_id = str(uuid.uuid4())
                 base_params = {
                     "aid": "497858",
-                    "device_id": settings.DOUBAO_DEVICE_ID or "7600236600187471401",
+                    "device_id": cred_obj.get("device_id") or settings.DOUBAO_DEVICE_ID or "7600236600187471401",
                     "device_platform": "web",
-                    "fp": settings.DOUBAO_FP or "verify_mkxf3p9i_hUn2VGVE_y5cH_4yp9_BjK6_iNSvN3wCyROz",
+                    "fp": cred_obj.get("fp") or settings.DOUBAO_FP or "verify_mkxf3p9i_hUn2VGVE_y5cH_4yp9_BjK6_iNSvN3wCyROz",
                     "language": "zh",
                     "pc_version": "3.9.0",
                     "pkg_type": "release_version",
                     "real_aid": "497858",
-                    "region": "",
-                    "samantha_web": "1",
-                    "sys_region": "",
-                    "tea_uuid": settings.DOUBAO_TEA_UUID or "7468737889876035084",
-                    "use-olympus-account": "1",
-                    "version_code": "20800",
-                    "web_id": settings.DOUBAO_WEB_ID or "7468737889876035084",
-                    "web_tab_id": str(uuid.uuid4())
+                    "region": "", "samantha_web": "1", "sys_region": "",
+                    "tea_uuid": cred_obj.get("tea_uuid") or settings.DOUBAO_TEA_UUID or "7468737889876035084",
+                    "use-olympus-account": "1", "version_code": "20800",
+                    "web_id": cred_obj.get("web_id") or settings.DOUBAO_WEB_ID or "7468737889876035084",
+                    "web_tab_id": web_tab_id,
+                    "msToken": self.playwright_manager.ms_token # 同步 URL 里的 msToken
                 }
                 headers = self._prepare_headers(final_cookie)
                 payload = await self._prepare_payload(messages, bot_id, conversation_id, user_model, final_cookie)
@@ -219,11 +220,13 @@ class DoubaoProvider(BaseProvider):
 
             except Exception as e:
                 last_exception = e
-                self.credential_manager.report_failure()
-                logger.warning(f"第 {attempt + 1} 次尝试失败: {str(e)}")
+                logger.warning(f"非流式尝试 {attempt + 1} 失败: {str(e)}")
                 if attempt < 2:
                     await asyncio.sleep(1) # 重试前稍作等待
-                continue
+                    continue
+            
+            # 如果走到这里，说明该账号的三次尝试全部失败 (耗尽轮询)
+            self.credential_manager.report_failure()
 
         # 如果走到这里，说明 3 次都失败了
         logger.error(f"非流式请求在 3 次重试后仍然失败: {str(last_exception)}")
@@ -261,23 +264,27 @@ class DoubaoProvider(BaseProvider):
                 is_thinking = False
                 streamed_any_data = False
 
-                base_cookie = self.credential_manager.get_credential()
-                final_cookie = self._get_dynamic_cookie(base_cookie)
+                cred_obj = self.credential_manager.get_credential()
+                final_cookie = self._get_dynamic_cookie(cred_obj["cookie"])
                 base_url = "https://www.doubao.com/chat/completion"
+                
+                # 动态获取指纹
+                web_tab_id = str(uuid.uuid4())
                 base_params = {
                     "aid": "497858",
-                    "device_id": settings.DOUBAO_DEVICE_ID or "7600236600187471401",
+                    "device_id": cred_obj.get("device_id") or settings.DOUBAO_DEVICE_ID or "7600236600187471401",
                     "device_platform": "web",
-                    "fp": settings.DOUBAO_FP or "verify_mkxf3p9i_hUn2VGVE_y5cH_4yp9_BjK6_iNSvN3wCyROz",
+                    "fp": cred_obj.get("fp") or settings.DOUBAO_FP or "verify_mkxf3p9i_hUn2VGVE_y5cH_4yp9_BjK6_iNSvN3wCyROz",
                     "language": "zh",
                     "pc_version": "3.9.0",
                     "pkg_type": "release_version",
                     "real_aid": "497858",
                     "region": "", "samantha_web": "1", "sys_region": "",
-                    "tea_uuid": settings.DOUBAO_TEA_UUID or "7468737889876035084",
+                    "tea_uuid": cred_obj.get("tea_uuid") or settings.DOUBAO_TEA_UUID or "7468737889876035084",
                     "use-olympus-account": "1", "version_code": "20800",
-                    "web_id": settings.DOUBAO_WEB_ID or "7468737889876035084",
-                    "web_tab_id": str(uuid.uuid4())
+                    "web_id": cred_obj.get("web_id") or settings.DOUBAO_WEB_ID or "7468737889876035084",
+                    "web_tab_id": web_tab_id,
+                    "msToken": self.playwright_manager.ms_token # 同步到 URL
                 }
                 headers = self._prepare_headers(final_cookie)
                 payload = await self._prepare_payload(messages, bot_id, conversation_id, user_model, final_cookie)
@@ -297,10 +304,16 @@ class DoubaoProvider(BaseProvider):
 
                     current_event = None
                     async for line in response.aiter_lines():
-                        streamed_any_data = True
                         line = line.strip()
                         if not line: continue
+                        
+                        # 打印原始 SSE 行，方便调试
+                        logger.debug(f"上游原始响应: {line}")
+                        if line.startswith("data:"):
+                            print(f"\n[Raw Data]: {line}") # 显式打印到终端
                             
+                        streamed_any_data = True
+                        
                         if line.startswith("event:"):
                             current_event = line[len("event:"):].strip()
                             continue
@@ -353,8 +366,10 @@ class DoubaoProvider(BaseProvider):
                             except Exception:
                                 continue
 
-                if not streamed_any_data:
-                    raise Exception("上游未返回任何数据流（空回）")
+                if not streamed_to_client:
+                    # 无论是否是新会话，只要没产生实际输出，通通重试。
+                    # 如果上游是因为审查拦截没吐字，重试 3 次后也会返回错误信息给用户。
+                    raise Exception("上游服务器响应成功但未返回有效文字内容")
 
                 # 成功结束
                 self.credential_manager.report_success()
@@ -369,7 +384,6 @@ class DoubaoProvider(BaseProvider):
 
             except Exception as e:
                 last_exception = e
-                self.credential_manager.report_failure()
                 logger.warning(f"流式尝试 {attempt + 1} 失败: {str(e)}")
                 
                 if streamed_to_client:
@@ -383,6 +397,9 @@ class DoubaoProvider(BaseProvider):
                 if attempt < 2:
                     await asyncio.sleep(1)
                     continue
+            
+            # 如果走到这里，说明该账号的三次尝试全部失败 (耗尽轮询)
+            self.credential_manager.report_failure()
         
         # 3次重试均失败且未输出过数据
         error_msg = f"经过3次重试后失败: {str(last_exception)}"
@@ -414,6 +431,7 @@ class DoubaoProvider(BaseProvider):
             "sec-ch-ua": '"Google Chrome";v="141", "Not?A_Brand";v="8", "Chromium";v="141"',
             "sec-ch-ua-mobile": "?0", "sec-ch-ua-platform": '"Windows"',
             "sec-fetch-dest": "empty", "sec-fetch-mode": "cors", "sec-fetch-site": "same-origin",
+            "x-flow-trace": f"04-{uuid.uuid4().hex}-{uuid.uuid4().hex[:16]}-01", # 模拟官方链路追踪头
         }
 
     async def _prepare_payload(self, messages: List[Dict[str, Any]], bot_id: str, conversation_id: str, user_model: str, cookie: str) -> Dict[str, Any]:

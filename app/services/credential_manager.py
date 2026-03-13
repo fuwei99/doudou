@@ -1,34 +1,90 @@
-# /app/services/credential_manager.py
 import threading
 import os
 import glob
-from typing import List
+import json
+from typing import List, Dict, Any, Union
 from loguru import logger
 
 class CredentialManager:
     def __init__(self, env_credentials: List[str]):
-        # 加载所有可能的凭证
+        # 加载所有可能的凭证，统一格式为 Dict
         self.credentials = self._load_all_credentials(env_credentials)
         
         if not self.credentials:
-            raise ValueError("未找到任何有效凭证（环境变量或 cookies 目录）。")
+            raise ValueError("未找到任何有效凭证（环境变量、cookies 目录或 cookies.json）。")
             
         self.index = 0
-        self.failure_count = 0  # 连续失败计数
+        self.failure_count = 0 
         self.lock = threading.Lock()
-        logger.info(f"凭证管理器已初始化，共加载 {len(self.credentials)} 个凭证。当前使用索引: {self.index}")
+        logger.info(f"凭证管理器已初始化，共加载 {len(self.credentials)} 个设备套件。")
 
-    def _load_all_credentials(self, env_credentials: List[str]) -> List[str]:
-        """合并环境变量和目录中的凭证"""
-        all_creds = list(env_credentials)
+    def _load_all_credentials(self, env_credentials: List[str]) -> List[Dict[str, Any]]:
+        """合并所有来源的凭证并标准化"""
+        standard_creds = []
         
-        # 加载 cookies 目录下的所有 .txt 文件
-        dir_creds = self._load_from_directory()
-        all_creds.extend(dir_creds)
+        # 1. 从环境变量加载并标准化
+        for c in env_credentials:
+            if c.strip():
+                standard_creds.append({"cookie": c.strip()})
         
-        # 去重并过滤空值
-        unique_creds = list(set([c.strip() for c in all_creds if c and c.strip()]))
-        return unique_creds
+        # 2. 从 cookies 目录加载
+        for c in self._load_from_directory():
+            standard_creds.append({"cookie": c})
+
+        # 3. 从环境变量 DOUBAO_COOKIES_JSON 加载
+        env_json_creds = self._load_from_env_json()
+        standard_creds.extend(env_json_creds)
+
+        # 4. 从 cookies.json 加载 (全家桶模式)
+        json_creds = self._load_from_json()
+        standard_creds.extend(json_creds)
+        
+        # 高级去重逻辑
+        unique_list = []
+        # 使用字典缓存，cookie 字符串作为 key，value 是最完整的那个凭证对象
+        dedup_map = {}
+        
+        for item in standard_creds:
+            cookie_key = item["cookie"].strip()
+            item["cookie"] = cookie_key # 顺便统一清洗
+            
+            if cookie_key not in dedup_map:
+                dedup_map[cookie_key] = item
+            else:
+                # 优先级竞争：如果新条目比旧条目多了设备信息，则替换它
+                existing = dedup_map[cookie_key]
+                # 简单判断：如果现有条目没 fp 但新条目有，就换新的
+                if not existing.get("fp") and item.get("fp"):
+                    dedup_map[cookie_key] = item
+        
+        return list(dedup_map.values())
+
+    def _load_from_env_json(self) -> List[Dict[str, Any]]:
+        """从环境变量 DOUBAO_COOKIES_JSON 加载"""
+        from app.core.config import settings
+        if settings.DOUBAO_COOKIES_JSON:
+            try:
+                data = json.loads(settings.DOUBAO_COOKIES_JSON)
+                if isinstance(data, list):
+                    logger.info(f"从环境变量 DOUBAO_COOKIES_JSON 加载了 {len(data)} 个全家桶凭证。")
+                    return data
+            except Exception as e:
+                logger.error(f"解析环境变量 DOUBAO_COOKIES_JSON 失败: {e}")
+        return []
+
+    def _load_from_json(self) -> List[Dict[str, Any]]:
+        """从 cookies.json 加载"""
+        json_path = os.path.join(os.getcwd(), "cookies.json")
+        if os.path.exists(json_path):
+            try:
+                with open(json_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    if isinstance(data, list):
+                        logger.info(f"从 cookies.json 加载了 {len(data)} 个全家桶凭证。")
+                        return data
+            except Exception as e:
+                logger.error(f"读取 cookies.json 失败: {e}")
+        return []
 
     def _load_from_directory(self) -> List[str]:
         """从 cookies 目录加载凭证"""
@@ -52,24 +108,19 @@ class CredentialManager:
         
         return creds
 
-    def get_credential(self) -> str:
-        """获取当前正在使用的凭证（不自动切换）"""
+    def get_credential(self) -> Dict[str, Any]:
+        """获取当前正在使用的设备凭证 (锁定当前账号)"""
         with self.lock:
-            credential = self.credentials[self.index]
-            logger.debug(f"使用凭证索引: {self.index} (连续失败次数: {self.failure_count})")
-            return credential
+            cred = self.credentials[self.index]
+            logger.debug(f"当前使用凭据索引: [{self.index}/{len(self.credentials)-1}]")
+            return cred
 
     def report_failure(self):
-        """上报当前凭证失败。如果连续失败达到3次，则强制切换。"""
+        """上报当前凭证失败。如果失败，立即切换到下一个，实现'故障切换'。"""
         with self.lock:
-            self.failure_count += 1
-            if self.failure_count >= 3:
-                old_index = self.index
-                self.index = (self.index + 1) % len(self.credentials)
-                self.failure_count = 0
-                logger.warning(f"凭证索引 {old_index} 连续失败3次，已切换到索引: {self.index}")
-            else:
-                logger.info(f"当前凭证索引 {self.index} 失败计数: {self.failure_count}/3")
+            old_index = self.index
+            self.index = (self.index + 1) % len(self.credentials)
+            logger.warning(f"凭证索引 {old_index} 确认失效，故障切换到索引: {self.index}")
 
     def report_success(self):
         """成功时重置失败计数"""
