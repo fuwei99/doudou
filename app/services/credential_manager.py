@@ -122,6 +122,10 @@ class CredentialManager:
 
     def _augment_with_url_params(self, item: Dict[str, Any]) -> Dict[str, Any]:
         """如果提供了 request_url，自动从中解析指纹参数"""
+        # 核心拦截：如果开启了强制全局指纹模式，则不解析 Cookie 自己的 URL
+        if settings.FORCE_FETCH_URL:
+            return item
+            
         url = item.get("request_url")
         if not url:
             return item

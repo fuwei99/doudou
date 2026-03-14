@@ -69,6 +69,9 @@ class Settings(BaseSettings):
     # 如果设置了此项，将自动从 URL 中解析 device_id, fp, tea_uuid, web_id 等参数
     FETCH_URL: Optional[str] = None
 
+    # 如果为 True，则强制使用全局 FETCH_URL 解析出的指纹，忽略 Cookie 自带的 request_url
+    FORCE_FETCH_URL: bool = False
+
     @model_validator(mode='after')
     def validate_settings(self) -> 'Settings':
         # 1. 解析 FETCH_URL (优先级高，自动提取指纹)
