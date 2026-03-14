@@ -125,5 +125,15 @@
         "current_usage": 0,
         "label": "expert_bc1fc2",
         "invalid_at": "2026-03-14 17:20:53"
+    },
+    {
+        "cookie": "hook_slardar_session_id=20260314165009B72303D89541CDBA6125; ttwid=1%7CVL5uPvb6V892FNv1YUiit7HGucep6gvhaLlzEySPOQg%7C1773478210%7C53717f14c74e28f3eba37aa7f3e458c4291c6ce67f22b703aae597098c4a3013; i18next=zh; flow_ssr_sidebar_expand=1; s_v_web_id=verify_mmq34zet_G9I2qYTN_lTsY_4Sxt_AQls_ccx7IC7x8QAg; passport_csrf_token=7b71ce300c959fa9c5f1dbfcc3bb9530; passport_csrf_token_default=7b71ce300c959fa9c5f1dbfcc3bb9530; odin_tt=2e5abb83188884e8fefe34a8d43ea5ac7b3bf4e8efd408929c0da41f81854b9d8ce0e86533eea551d12eb3760b57fc88c88a40200ed0a893ef7facbe5de88f40b3ec6572c4a1d3daa223d47e92f83e72",
+        "request_url": "https://www.doubao.com/chat/completion?aid=497858&device_id=7617030862559512118&device_platform=web&fp=verify_mmq34zet_G9I2qYTN_lTsY_4Sxt_AQls_ccx7IC7x8QAg&language=zh&pc_version=3.10.0&pkg_type=release_version&real_aid=497858&region=&samantha_web=1&sys_region=&tea_uuid=7617030879840241190&use-olympus-account=1&version_code=20800&web_id=7617030879840241190&web_tab_id=757e432d-1afb-438e-9f3b-51845861f4a2&a_bogus=mj05kztLEp%2FcKdFbuOkkeUI5%2FymlNTSyusioS9P5yFzGPwMYW51xTCoTjFYcaQS7g8swhK57fjC0bEfbu83eUlrpFmhkuOXRxU2I9XsL2qwVa0vsEHDqCg0FzwBbMbTLaA9vi1g5WsBL6EclVNoBAN5GC5ziRmYpSqendKY9bDCUpB6TI9QJC5iWHqy%3D",
+        "pinned_conversation_id": "38417026212292866",
+        "pinned_query_id": "40282048574748930",
+        "is_anonymous": true,
+        "current_usage": 1,
+        "label": "expert_8930f0",
+        "invalid_at": "2026-03-14 17:24:26"
     }
 ]

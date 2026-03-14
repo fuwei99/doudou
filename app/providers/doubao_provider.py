@@ -428,7 +428,7 @@ class DoubaoProvider(BaseProvider):
                                             chunk = create_chat_completion_chunk(request_id, user_model, content=m_content)
                                             yield create_sse_data(chunk)
                                             streamed_to_client = True
-                                        packet_extracted_text = True
+                                            packet_extracted_text = True
 
                                     # --- 处理补丁操作 (patch_op) ---
                                     patch_ops = data.get("patch_op", [])
@@ -454,7 +454,7 @@ class DoubaoProvider(BaseProvider):
                                                             chunk = create_chat_completion_chunk(request_id, user_model, content=txt)
                                                         yield create_sse_data(chunk)
                                                         streamed_to_client = True
-                                                    packet_extracted_text = True
+                                                        packet_extracted_text = True
                                                 
                                         # 处理图片逻辑
                                         image_urls = self._extract_image_urls(blocks)
@@ -478,7 +478,7 @@ class DoubaoProvider(BaseProvider):
                                                     chunk = create_chat_completion_chunk(request_id, user_model, content=txt)
                                                     yield create_sse_data(chunk)
                                                     streamed_to_client = True
-                                                packet_extracted_text = True
+                                                    packet_extracted_text = True
                                         
                                         # 提取思考状态
                                         if block.get("block_type") == 10040:
