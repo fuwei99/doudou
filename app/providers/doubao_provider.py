@@ -586,16 +586,22 @@ class DoubaoProvider(BaseProvider):
         return urls
 
     def _prepare_headers(self, cookie: str) -> Dict[str, str]:
+        # 严格参考 refer.txt 的 Header 结构
         return {
-            "Accept": "*/*", "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
-            "Content-Type": "application/json", "Cookie": cookie,
-            "Origin": "https://www.doubao.com", "Referer": "https://www.doubao.com/chat/",
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36",
+            "accept": "*/*",
+            "accept-language": "zh-CN,zh;q=0.9,en;q=0.8",
             "agw-js-conv": "str, str",
+            "content-type": "application/json",
             "sec-ch-ua": '"Not:A-Brand";v="99", "Google Chrome";v="145", "Chromium";v="145"',
-            "sec-ch-ua-mobile": "?0", "sec-ch-ua-platform": '"Windows"',
-            "sec-fetch-dest": "empty", "sec-fetch-mode": "cors", "sec-fetch-site": "same-origin",
-            "x-flow-trace": f"04-{uuid.uuid4().hex}-{uuid.uuid4().hex[:16]}-01", # 模拟官方链路追踪头
+            "sec-ch-ua-mobile": "?0",
+            "sec-ch-ua-platform": '"Windows"',
+            "sec-fetch-dest": "empty",
+            "sec-fetch-mode": "cors",
+            "sec-fetch-site": "same-origin",
+            "x-flow-trace": f"04-{uuid.uuid4().hex}-{uuid.uuid4().hex[:16]}-01",
+            "cookie": cookie,
+            "Referer": "https://www.doubao.com/chat/",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36",
         }
 
     async def _prepare_payload(self, messages: List[Dict[str, Any]], bot_id: str, conversation_id: str, user_model: str, cred_obj: Dict[str, Any], final_cookie: str) -> Dict[str, Any]:
