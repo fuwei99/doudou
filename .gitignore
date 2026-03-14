@@ -5,6 +5,7 @@
 reference/
 cookies/
 cookies.json
+invaild-cookies.json
 cookies.js
 anonymous_cookies_test.json
 cookie-fetch-test.py
