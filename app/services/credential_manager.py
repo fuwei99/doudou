@@ -122,7 +122,9 @@ class CredentialManager:
                 self._check_and_refill()
                 raise ValueError("未找到可用凭证，系统正在抓取中...")
             self.index %= len(creds)
-            return creds[self.index]
+            cred = creds[self.index]
+            logger.debug(f"正在获取凭证: 索引 [{self.index}/{len(creds)-1}], Cookie: {cred.get('cookie', '')[:10]}...")
+            return cred
 
     def report_failure(self, permanent: bool = False):
         """上报失败并同步文件"""
@@ -134,8 +136,11 @@ class CredentialManager:
                 self._move_to_invalid(creds.pop(self.index))
                 self._save_list_to_json(creds, "cookies.json")
                 if creds: self.index %= len(creds)
+                logger.error(f"凭证已永久移除，当前索引重置为: {self.index}")
             else:
+                old_index = self.index
                 self.index = (self.index + 1) % len(creds)
+                logger.warning(f"触发故障切号：索引 [{old_index}] -> [{self.index}]，活跃池总数: {len(creds)}")
             self._check_and_refill()
 
     def report_success(self, cookie: str):
