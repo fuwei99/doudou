@@ -72,7 +72,7 @@ class PlaywrightManager:
             }
             logger.success(f"已从配置中加载静态设备指纹: {self.static_device_fingerprint}")
             
-            self.ms_token = None
+            self.ms_token = settings.DOUBAO_MS_TOKEN
 
             async def _handle_response(response):
                 try:

@@ -37,6 +37,7 @@ class Settings(BaseSettings):
     DOUBAO_FP: str = "verify_mkxf3p9i_hUn2VGVE_y5cH_4yp9_BjK6_iNSvN3wCyROz"
     DOUBAO_TEA_UUID: str = "7468737889876035084"
     DOUBAO_WEB_ID: str = "7468737889876035084"
+    DOUBAO_MS_TOKEN: Optional[str] = None
 
     # --- 上游 API 配置 ---
     API_REQUEST_TIMEOUT: int = 180
@@ -63,14 +64,45 @@ class Settings(BaseSettings):
         "doubao-pro-expert": 3,
     }
 
+    # --- 快捷配置 ---
+    # 如果设置了此项，将自动从 URL 中解析 device_id, fp, tea_uuid, web_id 等参数
+    FETCH_URL: Optional[str] = None
+
     @model_validator(mode='after')
     def validate_settings(self) -> 'Settings':
-        # 从环境变量 COOKIES 加载，支持用 | 分隔多个
+        # 1. 解析 FETCH_URL (优先级高，自动提取指纹)
+        if self.FETCH_URL:
+            try:
+                from urllib.parse import urlparse, parse_qs
+                parsed = urlparse(self.FETCH_URL)
+                params = parse_qs(parsed.query)
+                
+                mappings = {
+                    "device_id": "DOUBAO_DEVICE_ID",
+                    "fp": "DOUBAO_FP",
+                    "tea_uuid": "DOUBAO_TEA_UUID",
+                    "web_id": "DOUBAO_WEB_ID",
+                    "msToken": "DOUBAO_MS_TOKEN" # 备用载入
+                }
+                
+                extracted = 0
+                for param_key, attr_name in mappings.items():
+                    val = params.get(param_key)
+                    if val and val[0]:
+                        setattr(self, attr_name, val[0])
+                        extracted += 1
+                
+                if extracted > 0:
+                    logger.success(f"已成功从 FETCH_URL 中提取并覆盖 {extracted} 个设备指纹参数。")
+            except Exception as e:
+                logger.warning(f"解析 FETCH_URL 失败: {e}")
+
+        # 2. 从环境变量 COOKIES 加载，支持用 | 分隔多个
         cookies_env = os.getenv("COOKIES")
         if cookies_env:
             self.DOUBAO_COOKIES.extend([c.strip() for c in cookies_env.split("|") if c.strip()])
         
-        # 保留原有的 DOUBAO_COOKIE_X 加载方式以保证兼容性
+        # 3. 保留原有的 DOUBAO_COOKIE_X 加载方式以保证兼容性
         i = 1
         while True:
             cookie_str = os.getenv(f"DOUBAO_COOKIE_{i}")
