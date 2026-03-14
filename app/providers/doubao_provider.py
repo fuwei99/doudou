@@ -256,7 +256,7 @@ class DoubaoProvider(BaseProvider):
                     raise Exception("服务器连接成功但未返回数据流（空回），怀疑 Cookie 限制。")
 
                 # 成功处理，重置计数并保存会话
-                self.credential_manager.report_success()
+                self.credential_manager.report_success(cred_obj["cookie"])
                 
                 if is_new_conversation and new_conversation_id:
                     self.session_manager.update_session(session_id, {"conversation_id": new_conversation_id})
@@ -515,7 +515,7 @@ class DoubaoProvider(BaseProvider):
                     raise Exception("上游服务器响应成功但未返回有效文字内容")
 
                 # 成功结束
-                self.credential_manager.report_success()
+                self.credential_manager.report_success(cred_obj["cookie"])
                 print("\n--------------------------\n")
                 if is_new_conversation and new_conversation_id:
                     self.session_manager.update_session(session_id, {"conversation_id": new_conversation_id})

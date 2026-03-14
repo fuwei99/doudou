@@ -87,7 +87,9 @@ class PlaywrightManager:
             self.page.on("response", _handle_response)
 
             if not credentials:
-                raise ValueError("Playwright 初始化需要至少一个有效的凭证。")
+                logger.warning("初始化时未提供预设凭证，将进入匿名待命状态。")
+                self.initialized = True
+                return
             
             logger.info("正在为初始页面加载设置 Cookie...")
             # 从第一个凭证对象中提取 cookie 字符串

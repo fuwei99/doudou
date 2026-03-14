@@ -11,13 +11,16 @@ class CredentialManager:
         # 加载所有可能的凭证，统一格式为 Dict
         self.credentials = self._load_all_credentials(env_credentials)
         
-        if not self.credentials:
-            raise ValueError("未找到任何有效凭证（环境变量、cookies 目录或 cookies.json）。")
-            
         self.index = 0
         self.failure_count = 0 
         self.lock = threading.Lock()
-        logger.info(f"凭证管理器已初始化，共加载 {len(self.credentials)} 个设备套件。")
+        
+        if not self.credentials:
+            logger.warning("未找到任何预设凭证，系统将尝试进入 [零配置启动] 模式。")
+            # 立即触发一次异步补货
+            self._check_and_refill()
+        else:
+            logger.info(f"凭证管理器已初始化，共加载 {len(self.credentials)} 个设备套件。")
 
     def _load_all_credentials(self, env_credentials: List[str]) -> List[Dict[str, Any]]:
         """合并所有来源的凭证并标准化"""
@@ -154,6 +157,11 @@ class CredentialManager:
     def get_credential(self) -> Dict[str, Any]:
         """获取当前正在使用的设备凭证 (锁定当前账号)"""
         with self.lock:
+            if not self.credentials:
+                # 尝试触发紧急补充
+                self._check_and_refill()
+                raise ValueError("当前没有可用的凭证，系统正在自动获取中，请稍后重试。")
+                
             cred = self.credentials[self.index]
             logger.debug(f"当前使用凭据索引: [{self.index}/{len(self.credentials)-1}]")
             return cred
@@ -165,12 +173,69 @@ class CredentialManager:
             self.index = (self.index + 1) % len(self.credentials)
             logger.warning(f"凭证索引 {old_index} 确认失效，故障切换到索引: {self.index}")
 
-    def report_success(self):
-        """成功时重置失败计数"""
+    def report_success(self, cookie: str):
+        """成功时重置失败计数，并增加使用次数计数"""
         with self.lock:
             if self.failure_count > 0:
                 self.failure_count = 0
-                logger.debug(f"凭证索引 {self.index} 请求成功，重置失败计数。")
+            
+            # 找到对应的凭据并增加计数
+            target_cred = None
+            for cred in self.credentials:
+                if cred.get("cookie") == cookie:
+                    target_cred = cred
+                    break
+            
+            if target_cred:
+                # 只有匿名账号（或指定了 max_usage 的账号）才执行强制淘汰
+                current = target_cred.get("current_usage", 0) + 1
+                target_cred["current_usage"] = current
+                
+                max_u = target_cred.get("max_usage", 0)
+                if max_u > 0 and current >= max_u:
+                    logger.warning(f"凭证使用次数已达上限 ({current}/{max_u})，正在准备淘汰并补充...")
+                    self.credentials.remove(target_cred)
+                    # 索引重置防止越界
+                    if self.index >= len(self.credentials) and len(self.credentials) > 0:
+                        self.index = 0
+                    
+                    # 触发异步补充 (只有当剩余账号不多时才补充)
+                    self._check_and_refill()
+
+    def _check_and_refill(self):
+        """检查是否需要补充匿名 Cookie"""
+        cookie_num = int(os.environ.get("COOKIE_NUM", 3))
+        if len(self.credentials) < cookie_num:
+            logger.info(f"当前剩余凭证 ({len(self.credentials)}) 低于设定阈值 ({cookie_num})，触发后台自动抓取...")
+            # 开启后台线程执行脚本，避免阻塞主流程
+            import subprocess
+            import sys
+            try:
+                # 异步运行 cookie-fetch.py，只抓取缺少的数量
+                needed = cookie_num - len(self.credentials)
+                env = os.environ.copy()
+                env["COOKIE_NUM"] = str(needed)
+                
+                def run_fetch():
+                    result = subprocess.run([sys.executable, "cookie-fetch.py"], env=env)
+                    if result.returncode == 0:
+                        # 重新加载 cookies.json 里的新内容并去重合并
+                        new_json_creds = self._load_from_json()
+                        with self.lock:
+                            # 简单的合并去重
+                            existing_cookies = {c["cookie"] for c in self.credentials}
+                            added_count = 0
+                            for item in new_json_creds:
+                                if item["cookie"] not in existing_cookies:
+                                    self.credentials.append(item)
+                                    added_count += 1
+                            logger.success(f"后台补货任务已完成，成功导入 {added_count} 个新凭证。")
+                    else:
+                        logger.error("后台补货脚本运行失败。")
+                
+                threading.Thread(target=run_fetch, daemon=True).start()
+            except Exception as e:
+                logger.error(f"启动补货任务失败: {e}")
 
     def update_persistence(self, cookie: str, conversation_id: str, query_id: str):
         """将捕获到的固定对话 ID 和查询 ID 回写到本地持久化存储中"""
