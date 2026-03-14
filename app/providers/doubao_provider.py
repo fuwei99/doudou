@@ -29,8 +29,11 @@ class DoubaoProvider(BaseProvider):
         self.client: httpx.AsyncClient = None
 
     async def initialize(self):
+        """初始化 Provider"""
         self.client = httpx.AsyncClient(timeout=settings.API_REQUEST_TIMEOUT)
-        await self.playwright_manager.initialize(self.credential_manager.credentials)
+        # 适配 CredentialManager 物理文件优先模式
+        creds = self.credential_manager._load_from_json("cookies.json")
+        await self.playwright_manager.initialize(creds)
         self.file_uploader = FileUploader(self.playwright_manager, self.client, settings)
 
     async def close(self):
@@ -296,24 +299,16 @@ class DoubaoProvider(BaseProvider):
             except Exception as e:
                 last_exception = e
                 err_str = str(e)
-                logger.warning(f"非流式尝试 {attempt + 1} 失败: {err_str}")
+                logger.warning(f"非流式尝试 {attempt + 1} 失败: {err_str[:100]}")
 
                 # 判定是否需要永久删除（仅限系统错误）
                 is_sys_err = "系统错误" in err_str or "710022019" in err_str or "710022013" in err_str
-                # 判定是否是业务错误（只要带错误码，无论是否系统错误都不重试）
-                is_biz_error = "error_code" in err_str or "7100" in err_str
-
-                if is_biz_error:
-                    logger.error(f"检测到业务错误，物理删除={is_sys_err}: {err_str[:100]}")
-                    self.credential_manager.report_failure(permanent=is_sys_err)
-                    break # 业务错误立即中断
-
-                if attempt == 2:
-                    # 最后一次重试也失败了，执行切换
-                    self.credential_manager.report_failure(permanent=is_sys_err)
-                else:
-                    await asyncio.sleep(1)
-                    continue
+                
+                # 无论什么错误，立即上报并切换索引
+                self.credential_manager.report_failure(permanent=is_sys_err)
+                
+                # 业务错误通常不需要原地重试 3 次，但为了保证兼容性，我们继续循环（已换号）
+                continue
 
         # 如果走到这里，说明请求最终失败了
         error_info = str(last_exception)
@@ -549,10 +544,10 @@ class DoubaoProvider(BaseProvider):
             except Exception as e:
                 last_exception = e
                 err_str = str(e)
-                logger.warning(f"流式尝试 {attempt + 1} 失败: {err_str}")
+                logger.warning(f"流式尝试 {attempt + 1} 失败: {err_str[:100]}")
                 
                 if streamed_to_client:
-                    # 中途出错无法重试
+                    # 一旦开始吐字，无法切换账号，直接报错
                     error_chunk = create_chat_completion_chunk(request_id, user_model, f"\n\n[流式中途出错]: {err_str}", "stop")
                     yield create_sse_data(error_chunk)
                     yield DONE_CHUNK
@@ -560,19 +555,10 @@ class DoubaoProvider(BaseProvider):
 
                 # 判定是否需要永久删除
                 is_sys_err = "系统错误" in err_str or "710022019" in err_str or "710022013" in err_str
-                # 判定是否是业务错误
-                is_biz_error = "error_code" in err_str or "7100" in err_str
-
-                if is_biz_error:
-                    logger.error(f"流式检测到业务错误，物理删除={is_sys_err}: {err_str[:100]}")
-                    self.credential_manager.report_failure(permanent=is_sys_err)
-                    break
-
-                if attempt == 2:
-                    self.credential_manager.report_failure(permanent=is_sys_err)
-                else:
-                    await asyncio.sleep(1)
-                    continue
+                
+                # 故障即换号：立即上报失败并切换到下一个凭证
+                self.credential_manager.report_failure(permanent=is_sys_err)
+                continue
         
         # 尝试结束且未输出过数据
         error_msg = f"经过 {attempt + 1} 次尝试后失败: {str(last_exception)}"
