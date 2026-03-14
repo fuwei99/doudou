@@ -17,6 +17,14 @@ async def fetch_one_cookie(browser):
         user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
     )
     page = await context.new_page()
+    
+    captured_url = [None]
+    async def handle_response(response):
+        if "chat/completion" in response.url and response.status == 200:
+            captured_url[0] = response.url
+
+    page.on("response", handle_response)
+
     try:
         logger.info("正在访问豆包首页获取初始 Session...")
         await page.goto("https://www.doubao.com/", wait_until="networkidle")
@@ -35,7 +43,7 @@ async def fetch_one_cookie(browser):
         # 提取全量 Cookie
         cookies_list = await context.cookies()
         if not cookies_list:
-            return None
+            return None, None
             
         cookie_str = "; ".join([f"{c['name']}={c['value']}" for c in cookies_list])
         
@@ -43,10 +51,10 @@ async def fetch_one_cookie(browser):
         if "ttwid" not in cookie_str and "s_v_web_id" not in cookie_str:
             logger.warning("捕获到的 Cookie 似乎不完整，可能触发了机器人验证")
             
-        return cookie_str
+        return cookie_str, captured_url[0]
     except Exception as e:
         logger.error(f"获取匿名 Cookie 过程出错: {e}")
-        return None
+        return None, None
     finally:
         await context.close()
 
@@ -71,10 +79,11 @@ async def main():
         success_count = 0
         fail_count = 0
         while success_count < num_to_fetch and fail_count < 5:
-            cookie = await fetch_one_cookie(browser)
+            cookie, url = await fetch_one_cookie(browser)
             if cookie:
                 new_creds.append({
                     "cookie": cookie,
+                    "request_url": url,
                     "current_usage": 0,
                     "is_anonymous": True,
                     "label": f"anonymous_{uuid.uuid4().hex[:6]}"

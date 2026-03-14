@@ -209,7 +209,18 @@ class CredentialManager:
     def _check_and_refill(self, is_initial=False):
         """检查是否需要补充匿名 Cookie"""
         cookie_num = settings.COOKIE_NUM
+        
+        # 核心逻辑：如果 AUTO_FILL 为 False，且不是初始化时的强行启动，则不补货
+        if not settings.AUTO_FILL and not is_initial:
+            return
+
         if len(self.credentials) < cookie_num:
+            # 如果 AUTO_FILL 关了但又是 initial 状态，我们打印一个特殊提示
+            if not settings.AUTO_FILL and is_initial:
+                logger.warning("AUTO_FILL 已关闭，系统将不会自动获取初始匿名 Cookie。")
+                self._initial_fetch_event.set()
+                return
+
             logger.info(f"当前剩余凭证 ({len(self.credentials)}) 低于设定阈值 ({cookie_num})，触发自动抓取...")
             import subprocess
             import sys
