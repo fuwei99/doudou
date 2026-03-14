@@ -172,12 +172,44 @@ class CredentialManager:
             logger.debug(f"当前使用凭据索引: [{self.index}/{len(self.credentials)-1}]")
             return cred
 
-    def report_failure(self):
-        """上报当前凭证失败。如果失败，立即切换到下一个，实现'故障切换'。"""
+    def report_failure(self, permanent: bool = False):
+        """
+        上报当前凭证失败。
+        :param permanent: 是否永久移除该凭证 (物理删除)。针对封号/失效错误。
+        """
         with self.lock:
+            if not self.credentials:
+                return
+
             old_index = self.index
-            self.index = (self.index + 1) % len(self.credentials)
-            logger.warning(f"凭证索引 {old_index} 确认失效，故障切换到索引: {self.index}")
+            target_cred = self.credentials[self.index]
+            
+            if permanent:
+                logger.error(f"凭证索引 {old_index} 检测到致命故障，正在执行物理删除...")
+                self.credentials.remove(target_cred)
+                # 持久化到 json
+                self._save_to_json()
+                # 索引处理：如果删除了，index 指向下一个，不需要 +1 了 (因为后面的自动顶上来了)
+                if self.index >= len(self.credentials) and len(self.credentials) > 0:
+                    self.index = 0
+            else:
+                self.index = (self.index + 1) % len(self.credentials)
+                logger.warning(f"凭证索引 {old_index} 确认失效，故障切换到索引: {self.index}")
+            
+            # 立即触发补货检查 (如果开启了 AUTO_FILL)
+            self._check_and_refill()
+
+    def _save_to_json(self):
+        """将当前匿名凭证同步回 cookies.json"""
+        json_path = os.path.join(os.getcwd(), "cookies.json")
+        try:
+            # 只保存匿名凭证（或者是从 json 加载出来的凭证）
+            save_list = [c for c in self.credentials if c.get("is_anonymous") or "current_usage" in c]
+            with open(json_path, "w", encoding="utf-8") as f:
+                json.dump(save_list, f, indent=4, ensure_ascii=False)
+            logger.info("已完成 cookies.json 的物理同步。")
+        except Exception as e:
+            logger.error(f"同步 cookies.json 失败: {e}")
 
     def report_success(self, cookie: str):
         """成功时重置失败计数，并增加使用次数计数"""

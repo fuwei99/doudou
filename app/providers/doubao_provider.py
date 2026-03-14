@@ -299,15 +299,18 @@ class DoubaoProvider(BaseProvider):
                 if attempt < 2:
                     # 如果是由于频率限制或账号异常，不应重试，直接切换账号
                     err_str = str(e)
-                    if "710022004" in err_str or "rate limited" in err_str.lower() or "710021000" in err_str:
-                        logger.warning(f"检测到致命凭证错误 ({err_str[:40]})，跳过重试，立即切换账号。")
+                    is_fatal = "710022004" in err_str or "rate limited" in err_str.lower() or "710021000" in err_str or "710022013" in err_str
+                    if is_fatal:
+                        logger.warning(f"检测到致命凭证错误 ({err_str[:40]})，跳过重试，立即物理删除该账号。")
                         break
                     
                     await asyncio.sleep(1) # 重试前稍作等待
                     continue
             
             # 耗尽重试或触发立即切换
-            self.credential_manager.report_failure()
+            err_str = str(last_exception)
+            is_permanent_fail = "710022013" in err_str or "710021000" in err_str
+            self.credential_manager.report_failure(permanent=is_permanent_fail)
 
         # 如果走到这里，说明请求最终失败了
         error_info = str(last_exception)
@@ -555,15 +558,18 @@ class DoubaoProvider(BaseProvider):
                 if attempt < 2:
                     # 如果是由于频率限制或账号异常，不应重试，直接切换账号
                     err_str = str(e)
-                    if "710022004" in err_str or "rate limited" in err_str.lower() or "710021000" in err_str:
-                        logger.warning(f"检测到致命凭证错误 ({err_str[:40]})，跳过重试，立即切换账号。")
+                    is_fatal = "710022004" in err_str or "rate limited" in err_str.lower() or "710021000" in err_str or "710022013" in err_str
+                    if is_fatal:
+                        logger.warning(f"检测到致命凭证错误 ({err_str[:40]})，跳过重试，立即切换账号并标记删除。")
                         break
                     
                     await asyncio.sleep(1)
                     continue
             
             # 耗尽重试或触发立即切换
-            self.credential_manager.report_failure()
+            err_str = str(last_exception)
+            is_permanent_fail = "710022013" in err_str or "710021000" in err_str
+            self.credential_manager.report_failure(permanent=is_permanent_fail)
         
         # 尝试结束且未输出过数据
         error_msg = f"经过 {attempt + 1} 次尝试后失败: {str(last_exception)}"
