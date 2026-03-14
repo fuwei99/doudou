@@ -6,6 +6,7 @@ from typing import Optional
 
 from fastapi import FastAPI, Request, HTTPException, Depends, Header
 from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.middleware.cors import CORSMiddleware
 from loguru import logger
 
 from app.core.config import settings
@@ -46,6 +47,15 @@ app = FastAPI(
     version=settings.APP_VERSION,
     description=settings.DESCRIPTION,
     lifespan=lifespan
+)
+
+# --- 添加 CORS 支持，解决 OPTIONS 请求 405 问题 ---
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 # --- 安全依赖 ---
