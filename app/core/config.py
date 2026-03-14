@@ -26,6 +26,11 @@ class Settings(BaseSettings):
     API_MASTER_KEY: Optional[str] = "1"
     NGINX_PORT: int = 8088
     
+    # --- 调试与网络配置 ---
+    DEBUG: bool = False
+    HTTP_URL: Optional[str] = None
+    LOGIN_WAIT_TIME: int = 15
+    
     # --- Doubao 凭证 ---
     DOUBAO_COOKIES: List[str] = []
     DOUBAO_COOKIES_JSON: Optional[str] = None

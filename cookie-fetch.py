@@ -2,6 +2,8 @@ import asyncio
 import os
 import json
 import uuid
+import subprocess
+import sys
 from playwright.async_api import async_playwright
 from loguru import logger
 try:
@@ -25,13 +27,15 @@ async def fetch_one_cookie(browser):
 
     page.on("response", handle_response)
 
+    wait_time = (settings.LOGIN_WAIT_TIME if settings else 15) * 1000
+
     try:
         logger.info("正在访问豆包首页获取初始 Session...")
         await page.goto("https://www.doubao.com/", wait_until="networkidle")
         
         # 等待并输入指令
         input_selector = 'textarea[data-testid="chat_input_input"]'
-        await page.wait_for_selector(input_selector, timeout=15000)
+        await page.wait_for_selector(input_selector, timeout=wait_time)
         
         await page.fill(input_selector, "你好")
         await page.press(input_selector, "Enter")
@@ -54,6 +58,22 @@ async def fetch_one_cookie(browser):
         return cookie_str, captured_url[0]
     except Exception as e:
         logger.error(f"获取匿名 Cookie 过程出错: {e}")
+        
+        if settings and settings.DEBUG:
+            logger.info("--- DEBUG 模式：执行诊断操作 ---")
+            try:
+                # 截图诊断
+                screenshot_path = f"debug_timeout_{uuid.uuid4().hex[:6]}.png"
+                await page.screenshot(path=screenshot_path)
+                logger.info(f"已保存调试截图至: {screenshot_path}")
+                
+                # Curl 诊断
+                logger.info("正在执行 curl -I https://www.doubao.com ...")
+                result = subprocess.run(["curl", "-I", "https://www.doubao.com"], capture_output=True, text=True, timeout=10)
+                logger.info(f"Curl 输出:\n{result.stdout}\n{result.stderr}")
+            except Exception as debug_e:
+                logger.error(f"执行调试诊断时出错: {debug_e}")
+                
         return None, None
     finally:
         await context.close()
@@ -64,8 +84,13 @@ async def main():
     default_times = settings.COOKIE_TIMES if settings else 10
     
     num_to_fetch = int(os.environ.get("COOKIE_NUM", default_num))
-    cookie_times = int(os.environ.get("COOKIE_TIMES", default_times))
     
+    # 代理配置
+    proxy = None
+    if settings and settings.HTTP_URL:
+        proxy = {"server": settings.HTTP_URL.strip()}
+        logger.info(f"使用代理抓取: {settings.HTTP_URL}")
+
     json_path = os.path.join(os.getcwd(), "cookies.json")
     
     logger.info(f"==== 匿名 Cookie 捕获任务启动 (目标数量: {num_to_fetch}) ====")
@@ -73,8 +98,8 @@ async def main():
     new_creds = []
     
     async with async_playwright() as p:
-        # 建议使用 headless=True 提高效率，除非需要调试
-        browser = await p.chromium.launch(headless=True)
+        # 使用代理启动浏览器
+        browser = await p.chromium.launch(headless=True, proxy=proxy)
         
         success_count = 0
         fail_count = 0
