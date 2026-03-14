@@ -56,6 +56,9 @@ async def register_one():
         logger.info("正在打开豆包官网，请稍候...")
         await page.goto(DOUBAO_URL)
         
+        # 等待 2 秒，让资源加载更彻底
+        await asyncio.sleep(2)
+
         # 等待输入框出现
         try:
             input_selector = 'textarea[data-testid="chat_input_input"]'
@@ -124,9 +127,9 @@ if __name__ == "__main__":
         logger.info(f"--- 正在执行第 {i+1}/{count} 个注册任务 ---")
         asyncio.run(register_one())
         if i < count - 1:
-            logger.info("任务间歇，等待 3 秒后继续...")
+            logger.info("任务间歇，等待 2 秒后继续...")
             import time
-            time.sleep(3)
+            time.sleep(2)
             
     print("\n" + "="*50)
     print(f"恭喜！所有任务已完成。请查看 {TARGET_FILE}")
