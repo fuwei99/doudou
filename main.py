@@ -1,21 +1,5 @@
 # /main.py
 import sys
-from types import ModuleType
-
-# --- Python 3.13 兼容性补丁: 模拟被移除的 pkg_resources ---
-try:
-    import pkg_resources
-except ImportError:
-    # 创建一个伪造的 pkg_resources 模块注入系统路径
-    mock_pkg = ModuleType("pkg_resources")
-    sys.modules["pkg_resources"] = mock_pkg
-    # playwright-stealth 主要使用 resource_filename 来找 js 脚本
-    # 我们这里提供一个简单的占位逻辑，防止它 import 报错
-    def resource_filename(package, resource):
-        import os
-        return os.path.join(os.path.dirname(sys.modules[package].__file__), resource)
-    mock_pkg.resource_filename = resource_filename
-
 import json
 from contextlib import asynccontextmanager
 from typing import Optional
