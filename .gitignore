@@ -10,6 +10,9 @@ anonymous_cookies_test.json
 cookie-fetch-test.py
 test/
 
+# 离线安装包 (用于云电脑迁移)
+!packages/
+
 # Python
 
 *.py[cod]

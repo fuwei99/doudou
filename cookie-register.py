@@ -5,7 +5,7 @@ import uuid
 import os
 import re
 from playwright.async_api import async_playwright
-from playwright_stealth import stealth
+from playwright_stealth import stealth_async
 from loguru import logger
 
 # 配置
@@ -20,7 +20,7 @@ async def register_one():
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36"
         )
         page = await context.new_page()
-        await stealth(page)
+        await stealth_async(page)
 
         captured_data = {
             "conversation_id": None,
