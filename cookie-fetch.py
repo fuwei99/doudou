@@ -4,6 +4,10 @@ import json
 import uuid
 from playwright.async_api import async_playwright
 from loguru import logger
+try:
+    from app.core.config import settings
+except ImportError:
+    settings = None
 
 async def fetch_one_cookie(browser):
     """
@@ -48,8 +52,12 @@ async def fetch_one_cookie(browser):
 
 async def main():
     # 从环境或默认值读取配置
-    num_to_fetch = int(os.environ.get("COOKIE_NUM", 3))
-    cookie_times = int(os.environ.get("COOKIE_TIMES", 10))
+    default_num = settings.COOKIE_NUM if settings else 3
+    default_times = settings.COOKIE_TIMES if settings else 10
+    
+    num_to_fetch = int(os.environ.get("COOKIE_NUM", default_num))
+    cookie_times = int(os.environ.get("COOKIE_TIMES", default_times))
+    
     json_path = os.path.join(os.getcwd(), "cookies.json")
     
     logger.info(f"==== 匿名 Cookie 捕获任务启动 (目标数量: {num_to_fetch}) ====")
@@ -67,7 +75,6 @@ async def main():
             if cookie:
                 new_creds.append({
                     "cookie": cookie,
-                    "max_usage": cookie_times,
                     "current_usage": 0,
                     "is_anonymous": True,
                     "label": f"anonymous_{uuid.uuid4().hex[:6]}"

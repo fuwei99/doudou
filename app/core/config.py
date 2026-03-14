@@ -42,6 +42,10 @@ class Settings(BaseSettings):
     API_REQUEST_TIMEOUT: int = 180
     DOUBAO_PC_VERSION: str = "3.10.0"  # 关键：同步抓包版本
     
+    # --- 匿名 Cookie 捕获配置 ---
+    COOKIE_NUM: int = 3       # 维持的最小匿名账号数量
+    COOKIE_TIMES: int = 10    # 每个匿名账号的最大使用次数
+    
     # --- 会话管理 ---
     SESSION_CACHE_TTL: int = 3600
 

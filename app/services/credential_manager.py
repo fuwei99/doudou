@@ -189,33 +189,35 @@ class CredentialManager:
                     break
             
             if target_cred:
-                # 只有匿名账号（或指定了 max_usage 的账号）才执行强制淘汰
+                # 只有匿名账号才执行自动淘汰逻辑
                 current = target_cred.get("current_usage", 0) + 1
                 target_cred["current_usage"] = current
                 
-                max_u = target_cred.get("max_usage", 0)
-                if max_u > 0 and current >= max_u:
-                    logger.warning(f"凭证使用次数已达上限 ({current}/{max_u})，正在准备淘汰并补充...")
+                # 直接获取全局配置的使用寿命上限
+                max_u = settings.COOKIE_TIMES
+                
+                if target_cred.get("is_anonymous") and current >= max_u:
+                    logger.warning(f"匿名凭证使用次数已达上限 ({current}/{max_u})，正在准备淘汰并补充...")
                     self.credentials.remove(target_cred)
                     # 索引重置防止越界
                     if self.index >= len(self.credentials) and len(self.credentials) > 0:
                         self.index = 0
                     
-                    # 触发异步补充 (只有当剩余账号不多时才补充)
+                    # 触发异步补充
                     self._check_and_refill()
 
     def _check_and_refill(self, is_initial=False):
         """检查是否需要补充匿名 Cookie"""
-        cookie_num = int(os.environ.get("COOKIE_NUM", settings.COOKIE_NUM if hasattr(settings, 'COOKIE_NUM') else 3))
+        cookie_num = settings.COOKIE_NUM
         if len(self.credentials) < cookie_num:
             logger.info(f"当前剩余凭证 ({len(self.credentials)}) 低于设定阈值 ({cookie_num})，触发自动抓取...")
-            # 开启后台线程执行脚本，避免阻塞主流程 (但初始化时我们会在外部等待)
             import subprocess
             import sys
             try:
                 needed = cookie_num - len(self.credentials)
                 env = os.environ.copy()
                 env["COOKIE_NUM"] = str(needed)
+                env["COOKIE_TIMES"] = str(settings.COOKIE_TIMES)
                 
                 def run_fetch():
                     result = subprocess.run([sys.executable, "cookie-fetch.py"], env=env)
