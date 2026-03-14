@@ -30,6 +30,10 @@ async def lifespan(app: FastAPI):
     global provider
     logger.info(f"应用启动中... {settings.APP_NAME} v{settings.APP_VERSION}")
     provider = DoubaoProvider()
+    
+    # 阻塞等待：如果是零配置启动，确保至少抓到第1波 Cookie 后再初始化签名服务
+    provider.credential_manager.wait_for_initial_fetch(timeout=60)
+    
     await provider.initialize()
     logger.info("服务已进入 'JS-Signature-as-a-Service' 模式。")
     logger.info(f"服务将在 http://localhost:{settings.NGINX_PORT} 上可用")

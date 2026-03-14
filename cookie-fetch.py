@@ -91,7 +91,7 @@ async def main():
             with open(json_path, "r", encoding="utf-8") as f:
                 content = f.read().strip()
                 if content:
-                    data = json.load(f)
+                    data = json.loads(content)
         except Exception as e:
             logger.warning(f"读取旧 cookies.json 出错: {e}")
 

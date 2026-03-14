@@ -5,6 +5,7 @@ import json
 from typing import List, Dict, Any, Union
 from urllib.parse import urlparse, parse_qs
 from loguru import logger
+from app.core.config import settings
 
 class CredentialManager:
     def __init__(self, env_credentials: List[str]):
@@ -14,12 +15,14 @@ class CredentialManager:
         self.index = 0
         self.failure_count = 0 
         self.lock = threading.Lock()
+        self._initial_fetch_event = threading.Event()
         
         if not self.credentials:
             logger.warning("未找到任何预设凭证，系统将尝试进入 [零配置启动] 模式。")
-            # 立即触发一次异步补货
-            self._check_and_refill()
+            # 立即触发补货，并设置事件在完成后通知
+            self._check_and_refill(is_initial=True)
         else:
+            self._initial_fetch_event.set() # 已有凭证，无需等待
             logger.info(f"凭证管理器已初始化，共加载 {len(self.credentials)} 个设备套件。")
 
     def _load_all_credentials(self, env_credentials: List[str]) -> List[Dict[str, Any]]:
@@ -71,7 +74,6 @@ class CredentialManager:
 
     def _load_from_env_json(self) -> List[Dict[str, Any]]:
         """从环境变量 DOUBAO_COOKIES_JSON 加载"""
-        from app.core.config import settings
         if settings.DOUBAO_COOKIES_JSON:
             try:
                 data = json.loads(settings.DOUBAO_COOKIES_JSON)
@@ -202,16 +204,15 @@ class CredentialManager:
                     # 触发异步补充 (只有当剩余账号不多时才补充)
                     self._check_and_refill()
 
-    def _check_and_refill(self):
+    def _check_and_refill(self, is_initial=False):
         """检查是否需要补充匿名 Cookie"""
-        cookie_num = int(os.environ.get("COOKIE_NUM", 3))
+        cookie_num = int(os.environ.get("COOKIE_NUM", settings.COOKIE_NUM if hasattr(settings, 'COOKIE_NUM') else 3))
         if len(self.credentials) < cookie_num:
-            logger.info(f"当前剩余凭证 ({len(self.credentials)}) 低于设定阈值 ({cookie_num})，触发后台自动抓取...")
-            # 开启后台线程执行脚本，避免阻塞主流程
+            logger.info(f"当前剩余凭证 ({len(self.credentials)}) 低于设定阈值 ({cookie_num})，触发自动抓取...")
+            # 开启后台线程执行脚本，避免阻塞主流程 (但初始化时我们会在外部等待)
             import subprocess
             import sys
             try:
-                # 异步运行 cookie-fetch.py，只抓取缺少的数量
                 needed = cookie_num - len(self.credentials)
                 env = os.environ.copy()
                 env["COOKIE_NUM"] = str(needed)
@@ -219,23 +220,32 @@ class CredentialManager:
                 def run_fetch():
                     result = subprocess.run([sys.executable, "cookie-fetch.py"], env=env)
                     if result.returncode == 0:
-                        # 重新加载 cookies.json 里的新内容并去重合并
                         new_json_creds = self._load_from_json()
                         with self.lock:
-                            # 简单的合并去重
                             existing_cookies = {c["cookie"] for c in self.credentials}
                             added_count = 0
                             for item in new_json_creds:
                                 if item["cookie"] not in existing_cookies:
                                     self.credentials.append(item)
                                     added_count += 1
-                            logger.success(f"后台补货任务已完成，成功导入 {added_count} 个新凭证。")
+                            logger.success(f"补货任务完成，成功导入 {added_count} 个新凭证。")
                     else:
-                        logger.error("后台补货脚本运行失败。")
+                        logger.error("补货脚本运行失败。")
+                    
+                    if is_initial:
+                        self._initial_fetch_event.set()
                 
                 threading.Thread(target=run_fetch, daemon=True).start()
             except Exception as e:
                 logger.error(f"启动补货任务失败: {e}")
+                if is_initial: self._initial_fetch_event.set()
+
+    def wait_for_initial_fetch(self, timeout=60):
+        """阻塞等待第一次抓取完成"""
+        if not self._initial_fetch_event.is_set():
+            logger.info(f"正在等待初始凭证捕获 (限时 {timeout}s)...")
+            return self._initial_fetch_event.wait(timeout=timeout)
+        return True
 
     def update_persistence(self, cookie: str, conversation_id: str, query_id: str):
         """将捕获到的固定对话 ID 和查询 ID 回写到本地持久化存储中"""
