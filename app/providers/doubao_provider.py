@@ -38,22 +38,31 @@ class DoubaoProvider(BaseProvider):
             await self.client.aclose()
         await self.playwright_manager.close()
 
-    def _get_dynamic_cookie(self, base_cookie: str) -> str:
+    def _get_dynamic_cookie(self, cred_obj: Dict[str, Any]) -> str:
         """
-        用 Playwright 捕获的最新 msToken 更新基础 Cookie 字符串。
-        这是确保签名和请求头一致性的关键。
+        实时维护 Cookie 字符串的合法性：
+        1. 同步 Playwright 捕获的最新的 msToken
+        2. 确保 Cookie 中的 s_v_web_id 与当前正在使用的 fp 指纹完全一致
         """
+        base_cookie = cred_obj["cookie"]
         latest_ms_token = self.playwright_manager.ms_token
-        if not latest_ms_token:
-            logger.warning("动态 Cookie 更新失败：Playwright 管理器中没有可用的 msToken。将使用原始 Cookie。")
-            return base_cookie
+        current_fp = cred_obj.get("fp") or settings.DOUBAO_FP
+        
+        new_cookie = base_cookie
 
-        if 'msToken=' in base_cookie:
-            new_cookie = re.sub(r'msToken=[^;]+', f'msToken={latest_ms_token}', base_cookie)
-            logger.info("成功将动态 msToken 更新到 Cookie 头中。")
-        else:
-            new_cookie = f"{base_cookie.strip(';')}; msToken={latest_ms_token}"
-            logger.info("原始 Cookie 中未找到 msToken，已追加最新的 msToken。")
+        # 1. 处理 msToken 同步
+        if latest_ms_token:
+            if 'msToken=' in new_cookie:
+                new_cookie = re.sub(r'msToken=[^;]+', f'msToken={latest_ms_token}', new_cookie)
+            else:
+                new_cookie = f"{new_cookie.strip(';')}; msToken={latest_ms_token}"
+        
+        # 2. 处理 s_v_web_id (即 fp) 同步
+        if current_fp:
+            if 's_v_web_id=' in new_cookie:
+                new_cookie = re.sub(r's_v_web_id=[^;]+', f's_v_web_id={current_fp}', new_cookie)
+            else:
+                new_cookie = f"{new_cookie.strip(';')}; s_v_web_id={current_fp}"
         
         return new_cookie
 
@@ -95,7 +104,7 @@ class DoubaoProvider(BaseProvider):
                 streamed_any_data = False
 
                 cred_obj = self.credential_manager.get_credential()
-                final_cookie = self._get_dynamic_cookie(cred_obj["cookie"])
+                final_cookie = self._get_dynamic_cookie(cred_obj)
                 base_url = "https://www.doubao.com/chat/completion"
                 
                 # 动态获取当前 Cookie 对应的指纹
@@ -344,7 +353,7 @@ class DoubaoProvider(BaseProvider):
                 streamed_any_data = False
 
                 cred_obj = self.credential_manager.get_credential()
-                final_cookie = self._get_dynamic_cookie(cred_obj["cookie"])
+                final_cookie = self._get_dynamic_cookie(cred_obj)
                 base_url = "https://www.doubao.com/chat/completion"
                 
                 # 动态获取指纹
@@ -793,7 +802,7 @@ class DoubaoProvider(BaseProvider):
             },
             "ext": {
                 "use_deep_think": str(settings.DEEP_THINK_MODELS.get(user_model, 0)),
-                "fp": settings.DOUBAO_FP or "verify_mkxf3p9i_hUn2VGVE_y5cH_4yp9_BjK6_iNSvN3wCyROz",
+                "fp": cred_obj.get("fp") or settings.DOUBAO_FP or "verify_mkxf3p9i_hUn2VGVE_y5cH_4yp9_BjK6_iNSvN3wCyROz",
                 "conversation_init_option": "{\"need_ack_conversation\":true}",
                 "commerce_credit_config_enable": "0",
                 "sub_conv_firstmet_type": "1"
