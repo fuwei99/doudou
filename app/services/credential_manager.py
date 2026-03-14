@@ -185,29 +185,56 @@ class CredentialManager:
             target_cred = self.credentials[self.index]
             
             if permanent:
-                logger.error(f"凭证索引 {old_index} 检测到致命故障，正在执行物理删除...")
+                logger.error(f"凭证索引 {old_index} 检测到致命故障，正在将其移出活跃池...")
+                # 转移到失效列表
+                self._move_to_invalid(target_cred)
+                # 从内存列表移除
                 self.credentials.remove(target_cred)
-                # 持久化到 json
+                # 同步活跃池 json
                 self._save_to_json()
                 # 索引处理：如果删除了，index 指向下一个，不需要 +1 了 (因为后面的自动顶上来了)
                 if self.index >= len(self.credentials) and len(self.credentials) > 0:
                     self.index = 0
+                logger.warning(f"由于物理删除，索引已重置或校正。当前索引: {self.index}")
             else:
+                old_index = self.index
                 self.index = (self.index + 1) % len(self.credentials)
                 logger.warning(f"凭证索引 {old_index} 确认失效，故障切换到索引: {self.index}")
             
             # 立即触发补货检查 (如果开启了 AUTO_FILL)
             self._check_and_refill()
 
+    def _move_to_invalid(self, cred: Dict[str, Any]):
+        """将失效凭证存入 invaild-cookies.json"""
+        invalid_path = os.path.join(os.getcwd(), "invaild-cookies.json")
+        try:
+            data = []
+            if os.path.exists(invalid_path):
+                with open(invalid_path, "r", encoding="utf-8") as f:
+                    content = f.read().strip()
+                    if content:
+                        data = json.loads(content)
+            
+            # 添加失效原因标签
+            cred_copy = cred.copy()
+            cred_copy["invalid_at"] = logger.module or "system" # 简单记录
+            data.append(cred_copy)
+            
+            with open(invalid_path, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=4, ensure_ascii=False)
+            logger.warning(f"凭证已安全移至 'invaild-cookies.json'。")
+        except Exception as e:
+            logger.error(f"写入 invaild-cookies.json 失败: {e}")
+            
     def _save_to_json(self):
-        """将当前匿名凭证同步回 cookies.json"""
+        """将当前内存中的所有有效凭证同步到本地 cookies.json"""
         json_path = os.path.join(os.getcwd(), "cookies.json")
         try:
-            # 只保存匿名凭证（或者是从 json 加载出来的凭证）
-            save_list = [c for c in self.credentials if c.get("is_anonymous") or "current_usage" in c]
+            # 不再过滤，只要是在内存池里的都是我们要保留的（除了刚被删除的）
+            save_list = self.credentials
             with open(json_path, "w", encoding="utf-8") as f:
                 json.dump(save_list, f, indent=4, ensure_ascii=False)
-            logger.info("已完成 cookies.json 的物理同步。")
+            logger.info(f"已完成 cookies.json 的物理同步，当前剩余: {len(save_list)} 个凭证。")
         except Exception as e:
             logger.error(f"同步 cookies.json 失败: {e}")
 

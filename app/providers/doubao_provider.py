@@ -295,22 +295,25 @@ class DoubaoProvider(BaseProvider):
 
             except Exception as e:
                 last_exception = e
-                logger.warning(f"非流式尝试 {attempt + 1} 失败: {str(e)}")
-                if attempt < 2:
-                    # 如果是由于频率限制或账号异常，不应重试，直接切换账号
-                    err_str = str(e)
-                    is_fatal = "710022004" in err_str or "rate limited" in err_str.lower() or "710021000" in err_str or "710022013" in err_str
-                    if is_fatal:
-                        logger.warning(f"检测到致命凭证错误 ({err_str[:40]})，跳过重试，立即物理删除该账号。")
-                        break
-                    
-                    await asyncio.sleep(1) # 重试前稍作等待
+                err_str = str(e)
+                logger.warning(f"非流式尝试 {attempt + 1} 失败: {err_str}")
+
+                # 判定是否需要永久删除（仅限系统错误）
+                is_sys_err = "系统错误" in err_str or "710022019" in err_str or "710022013" in err_str
+                # 判定是否是业务错误（只要带错误码，无论是否系统错误都不重试）
+                is_biz_error = "error_code" in err_str or "7100" in err_str
+
+                if is_biz_error:
+                    logger.error(f"检测到业务错误，物理删除={is_sys_err}: {err_str[:100]}")
+                    self.credential_manager.report_failure(permanent=is_sys_err)
+                    break # 业务错误立即中断
+
+                if attempt == 2:
+                    # 最后一次重试也失败了，执行切换
+                    self.credential_manager.report_failure(permanent=is_sys_err)
+                else:
+                    await asyncio.sleep(1)
                     continue
-            
-            # 耗尽重试或触发立即切换
-            err_str = str(last_exception)
-            is_permanent_fail = "710022013" in err_str or "710021000" in err_str
-            self.credential_manager.report_failure(permanent=is_permanent_fail)
 
         # 如果走到这里，说明请求最终失败了
         error_info = str(last_exception)
@@ -545,31 +548,31 @@ class DoubaoProvider(BaseProvider):
 
             except Exception as e:
                 last_exception = e
-                logger.warning(f"流式尝试 {attempt + 1} 失败: {str(e)}")
+                err_str = str(e)
+                logger.warning(f"流式尝试 {attempt + 1} 失败: {err_str}")
                 
                 if streamed_to_client:
-                    # 如果已经向客户端发过数据，不能再重试（会导致格式错误），直接补一个错误块
-                    logger.error("流式输出中途出错，无法重试。")
-                    error_chunk = create_chat_completion_chunk(request_id, user_model, f"\n\n[流式中途出错]: {str(e)}", "stop")
+                    # 中途出错无法重试
+                    error_chunk = create_chat_completion_chunk(request_id, user_model, f"\n\n[流式中途出错]: {err_str}", "stop")
                     yield create_sse_data(error_chunk)
                     yield DONE_CHUNK
                     return
-                
-                if attempt < 2:
-                    # 如果是由于频率限制或账号异常，不应重试，直接切换账号
-                    err_str = str(e)
-                    is_fatal = "710022004" in err_str or "rate limited" in err_str.lower() or "710021000" in err_str or "710022013" in err_str
-                    if is_fatal:
-                        logger.warning(f"检测到致命凭证错误 ({err_str[:40]})，跳过重试，立即切换账号并标记删除。")
-                        break
-                    
+
+                # 判定是否需要永久删除
+                is_sys_err = "系统错误" in err_str or "710022019" in err_str or "710022013" in err_str
+                # 判定是否是业务错误
+                is_biz_error = "error_code" in err_str or "7100" in err_str
+
+                if is_biz_error:
+                    logger.error(f"流式检测到业务错误，物理删除={is_sys_err}: {err_str[:100]}")
+                    self.credential_manager.report_failure(permanent=is_sys_err)
+                    break
+
+                if attempt == 2:
+                    self.credential_manager.report_failure(permanent=is_sys_err)
+                else:
                     await asyncio.sleep(1)
                     continue
-            
-            # 耗尽重试或触发立即切换
-            err_str = str(last_exception)
-            is_permanent_fail = "710022013" in err_str or "710021000" in err_str
-            self.credential_manager.report_failure(permanent=is_permanent_fail)
         
         # 尝试结束且未输出过数据
         error_msg = f"经过 {attempt + 1} 次尝试后失败: {str(last_exception)}"
