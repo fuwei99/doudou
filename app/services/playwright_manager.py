@@ -6,7 +6,7 @@ import os
 from typing import Optional, Dict, List, Any
 from urllib.parse import urlencode, urlparse
 
-from playwright_stealth import stealth_async
+from playwright_stealth import stealth
 from playwright.async_api import async_playwright, Browser, Page, ConsoleMessage, TimeoutError, Route, Request
 from loguru import logger
 
@@ -60,7 +60,7 @@ class PlaywrightManager:
             )
             self.page = await self.browser.new_page()
 
-            await stealth_async(self.page)
+            await stealth(self.page)
             self.page.on("console", handle_console_message)
             await self.page.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
 
