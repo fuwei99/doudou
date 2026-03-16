@@ -81,81 +81,81 @@ class DoubaoProvider(BaseProvider):
             return await self._non_stream_completion(request_data)
 
     async def _non_stream_completion(self, request_data: Dict[str, Any]) -> JSONResponse:
-        """
-        处理非流式聊天补全请求。已移除重试机制。
-        """
-        try:
-            session_id = request_data.get("user", f"session-{uuid.uuid4().hex}")
-            messages = request_data.get("messages", [])
-            user_model = request_data.get("model", settings.DEFAULT_MODEL)
+        max_retry = settings.MAX_RETRY
+        last_err_str = "Unknown error"
+        user_model = request_data.get("model", settings.DEFAULT_MODEL)
+        request_id = f"chatcmpl-{uuid.uuid4()}"
 
-            bot_id = settings.MODEL_MAPPING.get(user_model)
-            if not bot_id:
-                raise HTTPException(status_code=400, detail=f"不支持的模型: {user_model}")
+        for attempt in range(max_retry + 1):
+            try:
+                session_id = request_data.get("user", f"session-{uuid.uuid4().hex}")
+                messages = request_data.get("messages", [])
 
-            session_data = self.session_manager.get_session(session_id) or {}
-            conversation_id = session_data.get("conversation_id", "0")
-            is_new_conversation = conversation_id == "0"
+                bot_id = settings.MODEL_MAPPING.get(user_model)
+                if not bot_id:
+                    raise HTTPException(status_code=400, detail=f"不支持的模型: {user_model}")
 
-            request_id = f"chatcmpl-{uuid.uuid4()}"
-            new_conversation_id = None
-            full_content = []
-            full_reasoning_content = []
-            is_thinking = False
-            streamed_any_data = False
+                session_data = self.session_manager.get_session(session_id) or {}
+                conversation_id = session_data.get("conversation_id", "0")
+                is_new_conversation = conversation_id == "0"
 
-            cred_obj = self.credential_manager.get_credential()
-            final_cookie = self._get_dynamic_cookie(cred_obj)
-            base_url = "https://www.doubao.com/chat/completion"
-            
-            # 动态获取当前 Cookie 对应的指纹
-            web_tab_id = str(uuid.uuid4())
-            base_params = {
-                "aid": "497858",
-                "device_id": cred_obj.get("device_id") or settings.DOUBAO_DEVICE_ID or "7600236600187471401",
-                "device_platform": "web",
-                "fp": cred_obj.get("fp") or settings.DOUBAO_FP or "verify_mkxf3p9i_hUn2VGVE_y5cH_4yp9_BjK6_iNSvN3wCyROz",
-                "language": "zh",
-                "pc_version": settings.DOUBAO_PC_VERSION,
-                "pkg_type": "release_version",
-                "real_aid": "497858",
-                "region": "", "samantha_web": "1", "sys_region": "",
-                "tea_uuid": cred_obj.get("tea_uuid") or settings.DOUBAO_TEA_UUID or "7468737889876035084",
-                "use-olympus-account": "1", "version_code": "20800",
-                "web_id": cred_obj.get("web_id") or settings.DOUBAO_WEB_ID or "7468737889876035084",
-                "web_tab_id": web_tab_id,
-                "msToken": self.playwright_manager.ms_token # 同步 URL 里的 msToken
-            }
-            headers = self._prepare_headers(final_cookie)
-            
-            # --- 核心逻辑: 注入全局指纹池中的参数 ---
-            if settings.FORCE_FETCH_URL and self.credential_manager.current_fp_url:
-                try:
-                    from urllib.parse import urlparse, parse_qs
-                    parsed = urlparse(self.credential_manager.current_fp_url)
-                    params = parse_qs(parsed.query)
-                    # 覆盖指纹参数
-                    for k, attr_name in {"device_id": "device_id", "fp": "fp", "tea_uuid": "tea_uuid", "web_id": "web_id"}.items():
-                        if k in params and params[k]:
-                            cred_obj[k] = params[k][0]
-                    logger.debug("已将指纹池中的全局指纹注入当前请求。")
-                except Exception as e:
-                    logger.warning(f"从指纹池注入指纹失败: {e}")
+                new_conversation_id = None
+                full_content = []
+                full_reasoning_content = []
+                is_thinking = False
+                streamed_any_data = False
 
-            payload = await self._prepare_payload(messages, bot_id, conversation_id, user_model, cred_obj, final_cookie)
+                # 每次尝试都重新获取凭证，以实现切号
+                cred_obj = self.credential_manager.get_credential()
+                final_cookie = self._get_dynamic_cookie(cred_obj)
+                base_url = "https://www.doubao.com/chat/completion"
+                
+                # 动态获取当前 Cookie 对应的指纹
+                web_tab_id = str(uuid.uuid4())
+                base_params = {
+                    "aid": "497858",
+                    "device_id": cred_obj.get("device_id") or settings.DOUBAO_DEVICE_ID or "7600236600187471401",
+                    "device_platform": "web",
+                    "fp": cred_obj.get("fp") or settings.DOUBAO_FP or "verify_mkxf3p9i_hUn2VGVE_y5cH_4yp9_BjK6_iNSvN3wCyROz",
+                    "language": "zh",
+                    "pc_version": settings.DOUBAO_PC_VERSION,
+                    "pkg_type": "release_version",
+                    "real_aid": "497858",
+                    "region": "", "samantha_web": "1", "sys_region": "",
+                    "tea_uuid": cred_obj.get("tea_uuid") or settings.DOUBAO_TEA_UUID or "7468737889876035084",
+                    "use-olympus-account": "1", "version_code": "20800",
+                    "web_id": cred_obj.get("web_id") or settings.DOUBAO_WEB_ID or "7468737889876035084",
+                    "web_tab_id": web_tab_id,
+                    "msToken": self.playwright_manager.ms_token # 同步 URL 里的 msToken
+                }
+                
+                # --- 核心逻辑: 注入全局指纹池中的参数 ---
+                if settings.FORCE_FETCH_URL and self.credential_manager.current_fp_url:
+                    try:
+                        from urllib.parse import urlparse, parse_qs
+                        parsed = urlparse(self.credential_manager.current_fp_url)
+                        params = parse_qs(parsed.query)
+                        # 覆盖指纹参数
+                        for k, attr_name in {"device_id": "device_id", "fp": "fp", "tea_uuid": "tea_uuid", "web_id": "web_id"}.items():
+                            if k in params and params[k]:
+                                cred_obj[k] = params[k][0]
+                        logger.debug(f"尝试 {attempt+1}: 已将指纹池中的全局指纹注入当前请求。")
+                    except Exception as e:
+                        logger.warning(f"从指纹池注入指纹失败: {e}")
 
-            log_headers = headers.copy()
-            log_headers["Cookie"] = "[REDACTED FOR SECURITY]"
-            logger.info("--- 准备向上游发送请求 (非流式) ---")
-            
-            signed_url = await self.playwright_manager.get_signed_url(base_url, final_cookie, base_params)
-            if not signed_url:
-                raise Exception("无法获取 a_bogus 签名, Playwright 服务可能异常。")
+                headers = self._prepare_headers(final_cookie)
+                payload = await self._prepare_payload(messages, bot_id, conversation_id, user_model, cred_obj, final_cookie)
 
-            async with self.client.stream("POST", signed_url, headers=headers, json=payload) as response:
-                new_ms_token = response.headers.get("x-ms-token")
-                if new_ms_token:
-                    self.playwright_manager.update_ms_token(new_ms_token)
+                logger.info(f"--- 准备向上游发送请求 (非流式, 尝试 {attempt+1}/{max_retry+1}) ---")
+                
+                signed_url = await self.playwright_manager.get_signed_url(base_url, final_cookie, base_params)
+                if not signed_url:
+                    raise Exception("无法获取 a_bogus 签名, Playwright 服务可能异常。")
+
+                async with self.client.stream("POST", signed_url, headers=headers, json=payload) as response:
+                    new_ms_token = response.headers.get("x-ms-token")
+                    if new_ms_token:
+                        self.playwright_manager.update_ms_token(new_ms_token)
 
                     if response.status_code != 200:
                         error_content = await response.aread()
@@ -182,7 +182,7 @@ class DoubaoProvider(BaseProvider):
                                     last_exception = Exception(f"豆包 API 错误: {data.get('error_code')} - {data.get('error_msg')}")
                                     # 立即打印错误，方便调试
                                     logger.error(str(last_exception))
-                                    raise last_exception # 改为抛出，而不是 break，确保能被捕获
+                                    raise last_exception
 
                                 if current_event == "SSE_ACK":
                                     ack_meta = data.get("ack_client_meta", {})
@@ -269,7 +269,6 @@ class DoubaoProvider(BaseProvider):
                                 continue
                             except Exception as e:
                                 logger.error(f"解析 SSE 数据时发生意外错误: {str(e)}")
-                                # 遇到这种错误，如果是我们主动抛出的 business 异常，就不应该被吞掉
                                 if "豆包 API 错误" in str(e):
                                     raise e
                                 continue
@@ -277,7 +276,7 @@ class DoubaoProvider(BaseProvider):
                 if not streamed_any_data:
                     raise Exception("服务器连接成功但未返回数据流（空回），怀疑 Cookie 限制。")
 
-                # 成功处理，重置计数并保存会话
+                # 成功处理
                 self.credential_manager.report_success(cred_obj["cookie"])
                 
                 if is_new_conversation and new_conversation_id:
@@ -286,7 +285,6 @@ class DoubaoProvider(BaseProvider):
                 final_text = "".join(full_content)
                 final_reasoning_text = "".join(full_reasoning_content)
 
-                # 按照用户要求，将完整的响应内容打印到终端
                 print("\n--- [非流式] 完整响应内容 ---")
                 if final_reasoning_text:
                     print(f"[思考过程]:\n{final_reasoning_text}\n")
@@ -306,55 +304,64 @@ class DoubaoProvider(BaseProvider):
                     "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
                 })
 
-        except Exception as e:
-            err_str = str(e)
-            logger.error(f"非流式请求失败: {err_str[:100]}")
-            # 判定是否需要永久删除（仅限系统错误）
-            is_sys_err = "系统错误" in err_str or "710022019" in err_str or "710022013" in err_str
-            # 故障即切换
-            self.credential_manager.report_failure(err_msg=err_str, permanent=is_sys_err)
-            
-            # 核心修复: 必须返回标准的 JSON 错误响应，否则前端会因为收到非 JSON(SSE) 数据而报错
-            return JSONResponse(
-                status_code=200, # 保持兼容性，或者 500
-                content={
-                    "id": request_id,
-                    "object": "chat.completion",
-                    "created": int(time.time()),
-                    "model": user_model if 'user_model' in locals() else "unknown",
-                    "choices": [{
-                        "index": 0, 
-                        "message": {
-                            "role": "assistant", 
-                            "content": f"豆包 API 错误: {err_str}"
-                        }, 
-                        "finish_reason": "stop"
-                    }]
-                }
-            )
-            
-            status_code = 500
-            if "710022004" in err_str: status_code = 429
-            return JSONResponse(
-                status_code=status_code,
-                content={"error": {"message": err_str, "type": "server_error", "code": None}}
-            )
+            except Exception as e:
+                err_str = str(e)
+                last_err_str = err_str
+                logger.error(f"非流式请求尝试 {attempt+1}/{max_retry+1} 失败: {err_str[:100]}")
+                
+                # 判定是否是可重试错误
+                is_sys_err = any(code in err_str for code in ["系统错误", "710022019", "710022013", "710022022"])
+                is_rate_limited = "rate limited" in err_str or "710022004" in err_str
+                
+                # 故障即上报并通过 RLock 触发轮换
+                self.credential_manager.report_failure(err_msg=err_str, permanent=is_sys_err)
+                
+                if (is_sys_err or is_rate_limited) and attempt < max_retry:
+                    logger.warning(f"检测到系统错误或限流，正在进行第 {attempt + 1} 次重试并切换凭证...")
+                    await asyncio.sleep(1)
+                    continue
+                
+                # 达上限或不可重试，跳出循环返回错误
+                break
+
+        # 失败响应
+        return JSONResponse(
+            status_code=200, 
+            content={
+                "id": request_id,
+                "object": "chat.completion",
+                "created": int(time.time()),
+                "model": user_model,
+                "choices": [{
+                    "index": 0, 
+                    "message": {
+                        "role": "assistant", 
+                        "content": f"请求失败 (已重试 {max_retry} 次): {last_err_str}"
+                    }, 
+                    "finish_reason": "stop"
+                }]
+            }
+        )
 
     FORBIDDEN_PLACEHOLDER = "抱歉，这个问题我无法回答，请修改后重试。如果还需要其他信息或者有其他问题，我会尽力为你提供帮助。"
 
     async def _stream_generator(self, request_data: Dict[str, Any]) -> AsyncGenerator[bytes, None]:
         """
-        处理流式聊天补全请求。已移除重试机制。
+        处理流式聊天补全请求。包含自动重试/切号逻辑。
         """
-        session_id = request_data.get("user", f"session-{uuid.uuid4().hex}")
-        messages = request_data.get("messages", [])
+        max_retry = settings.MAX_RETRY
+        last_err_str = "Unknown error"
         user_model = request_data.get("model", settings.DEFAULT_MODEL)
-        bot_id = settings.MODEL_MAPPING.get(user_model)
         request_id = f"chatcmpl-{uuid.uuid4()}"
         
         streamed_to_client = False  # 是否已经开始向请求方发送有效数据
 
-        try:
+        for attempt in range(max_retry + 1):
+            try:
+                session_id = request_data.get("user", f"session-{uuid.uuid4().hex}")
+                messages = request_data.get("messages", [])
+                bot_id = settings.MODEL_MAPPING.get(user_model)
+                
                 if not bot_id:
                     error_chunk = create_chat_completion_chunk(request_id, user_model, f"不支持的模型: {user_model}", "stop")
                     yield create_sse_data(error_chunk)
@@ -368,6 +375,7 @@ class DoubaoProvider(BaseProvider):
                 is_thinking = False
                 streamed_any_data = False
 
+                # 每次尝试都重新获取凭证
                 cred_obj = self.credential_manager.get_credential()
                 final_cookie = self._get_dynamic_cookie(cred_obj)
                 base_url = "https://www.doubao.com/chat/completion"
@@ -400,21 +408,26 @@ class DoubaoProvider(BaseProvider):
                         for k, attr_name in {"device_id": "device_id", "fp": "fp", "tea_uuid": "tea_uuid", "web_id": "web_id"}.items():
                             if k in params and params[k]:
                                 cred_obj[k] = params[k][0]
+                        logger.debug(f"尝试 {attempt+1}: 已将指纹池中的全局指纹注入当前请求。")
                     except: pass
 
                 headers = self._prepare_headers(final_cookie)
                 payload = await self._prepare_payload(messages, bot_id, conversation_id, user_model, cred_obj, final_cookie)
 
-                logger.info("--- 准备向上游发送请求 (流式) ---")
+                logger.info(f"--- 准备向上游发送请求 (流式, 尝试 {attempt+1}/{max_retry+1}) ---")
                 
-                print("\n--- [流式] 响应内容 ---")
-
                 signed_url = await self.playwright_manager.get_signed_url(base_url, final_cookie, base_params)
                 if not signed_url:
                     raise Exception("无法获取 a_bogus 签名")
 
                 async with self.client.stream("POST", signed_url, headers=headers, json=payload) as response:
+                    # 更新 msToken
+                    new_ms_token = response.headers.get("x-ms-token")
+                    if new_ms_token:
+                        self.playwright_manager.update_ms_token(new_ms_token)
+
                     if response.status_code != 200:
+                        logger.error(f"尝试 {attempt+1} 失败，状态码: {response.status_code}")
                         response.raise_for_status()
 
                     current_event = None
@@ -422,11 +435,6 @@ class DoubaoProvider(BaseProvider):
                         line = line.strip()
                         if not line: continue
                         
-                        # 打印原始 SSE 行，方便调试
-                        logger.debug(f"上游原始响应: {line}")
-                        if line.startswith("data:"):
-                            print(f"\n[Raw Data]: {line}") # 显式打印到终端
-                            
                         streamed_any_data = True
                         
                         if line.startswith("event:"):
@@ -442,7 +450,9 @@ class DoubaoProvider(BaseProvider):
                                 
                                 # 检查是否有 error_code
                                 if "error_code" in data:
-                                    raise Exception(f"豆包 API 错误: {data.get('error_code')} - {data.get('error_msg')}")
+                                    last_exception = Exception(f"豆包 API 错误: {data.get('error_code')} - {data.get('error_msg')}")
+                                    logger.error(str(last_exception))
+                                    raise last_exception
 
                                 if current_event == "SSE_ACK":
                                     ack_meta = data.get("ack_client_meta", {})
@@ -453,7 +463,6 @@ class DoubaoProvider(BaseProvider):
                                     if query_list and new_conversation_id:
                                         server_query_id = query_list[0].get("question_id")
                                         if server_query_id:
-                                            logger.success(f"捕获到持久化 ID: Conv={new_conversation_id}, Query={server_query_id}")
                                             self.credential_manager.update_persistence(
                                                 cred_obj["cookie"], 
                                                 new_conversation_id, 
@@ -467,10 +476,7 @@ class DoubaoProvider(BaseProvider):
                                     content_obj = data.get("content", {})
                                     m_content = content_obj.get("model_content")
                                     if m_content:
-                                        if m_content.strip() == self.FORBIDDEN_PLACEHOLDER:
-                                            logger.info("检测到审核垫片消息（model_content），已拦截屏蔽")
-                                        else:
-                                            print(m_content, end="", flush=True)
+                                        if m_content.strip() != self.FORBIDDEN_PLACEHOLDER:
                                             chunk = create_chat_completion_chunk(request_id, user_model, content=m_content)
                                             yield create_sse_data(chunk)
                                             streamed_to_client = True
@@ -490,10 +496,7 @@ class DoubaoProvider(BaseProvider):
                                             if block.get("block_type") == 10000:
                                                 txt = block.get("content", {}).get("text_block", {}).get("text")
                                                 if txt and not packet_extracted_text:
-                                                    if txt.strip() == self.FORBIDDEN_PLACEHOLDER:
-                                                        logger.info("检测到审核垫片消息（patch_op），已拦截屏蔽")
-                                                    else:
-                                                        print(txt, end="", flush=True)
+                                                    if txt.strip() != self.FORBIDDEN_PLACEHOLDER:
                                                         if is_thinking:
                                                             chunk = create_chat_completion_chunk(request_id, user_model, content="", reasoning_content=txt)
                                                         else:
@@ -517,10 +520,7 @@ class DoubaoProvider(BaseProvider):
                                         if block.get("block_type") == 10000:
                                             txt = block.get("content", {}).get("text_block", {}).get("text")
                                             if txt and not packet_extracted_text:
-                                                if txt.strip() == self.FORBIDDEN_PLACEHOLDER:
-                                                    logger.info("检测到审核垫片消息（content_block），已拦截屏蔽")
-                                                else:
-                                                    print(txt, end="", flush=True)
+                                                if txt.strip() != self.FORBIDDEN_PLACEHOLDER:
                                                     chunk = create_chat_completion_chunk(request_id, user_model, content=txt)
                                                     yield create_sse_data(chunk)
                                                     streamed_to_client = True
@@ -540,10 +540,7 @@ class DoubaoProvider(BaseProvider):
                                 elif current_event == "CHUNK_DELTA":
                                     delta_content = data.get("text", "")
                                     if delta_content:
-                                        if delta_content.strip() == self.FORBIDDEN_PLACEHOLDER:
-                                            logger.info("检测到审核垫片消息（CHUNK_DELTA），已拦截屏蔽")
-                                        else:
-                                            print(delta_content, end="", flush=True)
+                                        if delta_content.strip() != self.FORBIDDEN_PLACEHOLDER:
                                             if is_thinking:
                                                 chunk = create_chat_completion_chunk(request_id, user_model, content="", reasoning_content=delta_content)
                                             else:
@@ -559,11 +556,6 @@ class DoubaoProvider(BaseProvider):
                                 logger.error(f"解析流式数据出错: {str(e)}")
                                 continue
 
-                if not streamed_to_client:
-                    # 无论是否是新会话，只要没产生实际输出，通通报错告知外层换号。
-                    raise Exception("上游服务器响应成功但未返回有效文字内容")
-
-                # 成功结束
                 self.credential_manager.report_success(cred_obj["cookie"])
                 print("\n--------------------------\n")
                 if is_new_conversation and new_conversation_id:
@@ -574,23 +566,37 @@ class DoubaoProvider(BaseProvider):
                 yield DONE_CHUNK
                 return 
 
-        except Exception as e:
-            err_str = str(e)
-            logger.error(f"流式请求失败: {err_str[:100]}")
-            
-            if streamed_to_client:
-                # 一旦开始吐字，无法切换账号，直接报错
-                error_chunk = create_chat_completion_chunk(request_id, user_model, f"\n\n[流式中途出错]: {err_str}", "stop")
-                yield create_sse_data(error_chunk)
-                yield DONE_CHUNK
-                return
+            except Exception as e:
+                err_str = str(e)
+                last_err_str = err_str
+                logger.error(f"流式请求尝试 {attempt+1}/{max_retry+1} 失败: {err_str[:100]}")
+                
+                if streamed_to_client:
+                    # 一旦开始吐字，无法切换账号，直接报错
+                    error_chunk = create_chat_completion_chunk(request_id, user_model, f"\n\n[流式中途出错]: {err_str}", "stop")
+                    yield create_sse_data(error_chunk)
+                    yield DONE_CHUNK
+                    return
 
-            # 故障即切换
-            self.credential_manager.report_failure(err_msg=err_str, permanent=is_sys_err)
-            
-            error_chunk = create_chat_completion_chunk(request_id, user_model, f"请求失败: {err_str}", "stop")
-            yield create_sse_data(error_chunk)
-            yield DONE_CHUNK
+                # 判定是否需要永久删除
+                is_sys_err = any(code in err_str for code in ["系统错误", "710022019", "710022013", "710022022"])
+                is_rate_limited = "rate limited" in err_str or "710022004" in err_str
+                
+                # 故障即切换
+                self.credential_manager.report_failure(err_msg=err_str, permanent=is_sys_err)
+                
+                if (is_sys_err or is_rate_limited) and attempt < max_retry:
+                    logger.warning(f"检测到可重试错误 ({err_str[:20]})，正在为下一次尝试切换凭证...")
+                    await asyncio.sleep(1)
+                    continue
+                
+                # 达上限或不可重试，跳出循环
+                break
+
+        # 如果重试耗尽
+        error_chunk = create_chat_completion_chunk(request_id, user_model, f"请求失败 (已重试 {max_retry} 次): {last_err_str}", "stop")
+        yield create_sse_data(error_chunk)
+        yield DONE_CHUNK
 
     def _is_audit_blocked(self, data: Dict[str, Any]) -> bool:
         """检查数据包是否包含审核拦截/假消息标志"""

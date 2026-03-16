@@ -12,7 +12,7 @@ from app.core.config import settings
 class CredentialManager:
     def __init__(self, env_credentials: List[str]):
         self.index = 0
-        self.lock = threading.Lock()
+        self.lock = threading.RLock()  # 使用递归锁，防止 report_failure 嵌套调用 rotate_fingerprint 时死锁
         self._initial_fetch_event = threading.Event()
         
         # 指纹池管理
@@ -118,6 +118,11 @@ class CredentialManager:
                         logger.info(f"成功加载指纹池，共 {len(self.fingerprint_pool)} 个指纹。")
             except Exception as e:
                 logger.error(f"加载指纹池失败: {e}")
+        
+        # 兜底：如果池为空但环境变量有设置，则使用环境变量的指纹
+        if not self.current_fp_url and settings.DOUBAO_FETCH_URL:
+            self.current_fp_url = settings.DOUBAO_FETCH_URL
+            logger.info("指纹池为空，已应用环境变量中的 DOUBAO_FETCH_URL。")
 
     def rotate_fingerprint(self):
         """轮换指纹"""
@@ -136,9 +141,8 @@ class CredentialManager:
                 self.current_fp_url = self.fingerprint_pool[0]
                 logger.success(f"已轮换到新指纹，剩余可用指纹: {len(self.fingerprint_pool)}")
             else:
-                self.current_fp_url = None
-                logger.warning("指纹池已耗尽，触发自动补货...")
-                self._check_and_refill_fingerprints()
+                self.current_fp_url = settings.DOUBAO_FETCH_URL
+                logger.warning("指纹池已耗尽，已回退至环境变量中的默认指纹。")
 
     def _save_fingerprints(self):
         path = os.path.join(os.getcwd(), "fetch_url.json")
@@ -148,11 +152,10 @@ class CredentialManager:
         except: pass
 
     def _check_and_refill_fingerprints(self):
-        """异步抓取新指纹"""
-        logger.info("正在由于限流或池空触发抓取新指纹...")
+        """手动触发抓取 (不再由系统自动调用)"""
+        logger.info("准备手动启动抓取新指纹工具...")
         def run():
             subprocess.run([sys.executable, "fetch-url.py"])
-            # 运行完后重新加载
             self._load_fingerprints()
         threading.Thread(target=run, daemon=True).start()
 

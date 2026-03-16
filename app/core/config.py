@@ -43,6 +43,9 @@ class Settings(BaseSettings):
     DOUBAO_TEA_UUID: str = "7468737889876035084"
     DOUBAO_WEB_ID: str = "7468737889876035084"
     DOUBAO_MS_TOKEN: Optional[str] = None
+    
+    # 允许直接通过环境变量提供一个可用的 FETCH_URL (包含有效指纹的完整 URL)
+    DOUBAO_FETCH_URL: Optional[str] = None
 
     # --- 上游 API 配置 ---
     API_REQUEST_TIMEOUT: int = 180
@@ -55,6 +58,7 @@ class Settings(BaseSettings):
     
     # --- 会话管理 ---
     SESSION_CACHE_TTL: int = 3600
+    MAX_RETRY: int = 3  # 最大重试次数
 
     # --- 模型配置 ---
     DEFAULT_MODEL: str = "doubao-pro-chat"
@@ -92,6 +96,10 @@ class Settings(BaseSettings):
             else:
                 break
         
+        # 4. 增加对环境变量 DOUBAO_FETCH_URL 的兜底支持
+        if not self.DOUBAO_FETCH_URL:
+            self.DOUBAO_FETCH_URL = os.getenv("DOUBAO_FETCH_URL")
+
         if not self.DOUBAO_COOKIES:
             logger.info("未在 .env 中发现 DOUBAO_COOKIE_X，将尝试从 cookies 目录加载。")
         
