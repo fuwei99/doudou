@@ -127,6 +127,21 @@ class DoubaoProvider(BaseProvider):
                 "msToken": self.playwright_manager.ms_token # 同步 URL 里的 msToken
             }
             headers = self._prepare_headers(final_cookie)
+            
+            # --- 核心逻辑: 注入全局指纹池中的参数 ---
+            if settings.FORCE_FETCH_URL and self.credential_manager.current_fp_url:
+                try:
+                    from urllib.parse import urlparse, parse_qs
+                    parsed = urlparse(self.credential_manager.current_fp_url)
+                    params = parse_qs(parsed.query)
+                    # 覆盖指纹参数
+                    for k, attr_name in {"device_id": "device_id", "fp": "fp", "tea_uuid": "tea_uuid", "web_id": "web_id"}.items():
+                        if k in params and params[k]:
+                            cred_obj[k] = params[k][0]
+                    logger.debug("已将指纹池中的全局指纹注入当前请求。")
+                except Exception as e:
+                    logger.warning(f"从指纹池注入指纹失败: {e}")
+
             payload = await self._prepare_payload(messages, bot_id, conversation_id, user_model, cred_obj, final_cookie)
 
             log_headers = headers.copy()
@@ -297,7 +312,7 @@ class DoubaoProvider(BaseProvider):
             # 判定是否需要永久删除（仅限系统错误）
             is_sys_err = "系统错误" in err_str or "710022019" in err_str or "710022013" in err_str
             # 故障即切换
-            self.credential_manager.report_failure(permanent=is_sys_err)
+            self.credential_manager.report_failure(err_msg=err_str, permanent=is_sys_err)
             
             # 核心修复: 必须返回标准的 JSON 错误响应，否则前端会因为收到非 JSON(SSE) 数据而报错
             return JSONResponse(
@@ -375,6 +390,18 @@ class DoubaoProvider(BaseProvider):
                     "web_tab_id": web_tab_id,
                     "msToken": self.playwright_manager.ms_token # 同步到 URL
                 }
+
+                # --- 核心逻辑: 注入全局指纹池中的参数 ---
+                if settings.FORCE_FETCH_URL and self.credential_manager.current_fp_url:
+                    try:
+                        from urllib.parse import urlparse, parse_qs
+                        parsed = urlparse(self.credential_manager.current_fp_url)
+                        params = parse_qs(parsed.query)
+                        for k, attr_name in {"device_id": "device_id", "fp": "fp", "tea_uuid": "tea_uuid", "web_id": "web_id"}.items():
+                            if k in params and params[k]:
+                                cred_obj[k] = params[k][0]
+                    except: pass
+
                 headers = self._prepare_headers(final_cookie)
                 payload = await self._prepare_payload(messages, bot_id, conversation_id, user_model, cred_obj, final_cookie)
 
@@ -558,11 +585,8 @@ class DoubaoProvider(BaseProvider):
                 yield DONE_CHUNK
                 return
 
-            # 判定是否需要永久删除
-            is_sys_err = "系统错误" in err_str or "710022019" in err_str or "710022013" in err_str
-            
             # 故障即切换
-            self.credential_manager.report_failure(permanent=is_sys_err)
+            self.credential_manager.report_failure(err_msg=err_str, permanent=is_sys_err)
             
             error_chunk = create_chat_completion_chunk(request_id, user_model, f"请求失败: {err_str}", "stop")
             yield create_sse_data(error_chunk)

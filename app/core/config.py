@@ -70,41 +70,12 @@ class Settings(BaseSettings):
         "doubao-pro-expert": 3,
     }
 
-    # --- 快捷配置 ---
-    # 如果设置了此项，将自动从 URL 中解析 device_id, fp, tea_uuid, web_id 等参数
-    FETCH_URL: Optional[str] = None
-
-    # 如果为 True，则强制使用全局 FETCH_URL 解析出的指纹，忽略 Cookie 自带的 request_url
-    FORCE_FETCH_URL: bool = False
+    # 如果为 True，则优先使用全局指纹池中的指纹，忽略 Cookie 自带的 request_url
+    FORCE_FETCH_URL: bool = True
 
     @model_validator(mode='after')
     def validate_settings(self) -> 'Settings':
-        # 1. 解析 FETCH_URL (优先级高，自动提取指纹)
-        if self.FETCH_URL:
-            try:
-                from urllib.parse import urlparse, parse_qs
-                parsed = urlparse(self.FETCH_URL)
-                params = parse_qs(parsed.query)
-                
-                mappings = {
-                    "device_id": "DOUBAO_DEVICE_ID",
-                    "fp": "DOUBAO_FP",
-                    "tea_uuid": "DOUBAO_TEA_UUID",
-                    "web_id": "DOUBAO_WEB_ID",
-                    "msToken": "DOUBAO_MS_TOKEN" # 备用载入
-                }
-                
-                extracted = 0
-                for param_key, attr_name in mappings.items():
-                    val = params.get(param_key)
-                    if val and val[0]:
-                        setattr(self, attr_name, val[0])
-                        extracted += 1
-                
-                if extracted > 0:
-                    logger.success(f"已成功从 FETCH_URL 中提取并覆盖 {extracted} 个设备指纹参数。")
-            except Exception as e:
-                logger.warning(f"解析 FETCH_URL 失败: {e}")
+        # 1. 解析指纹池 (TODO: 将在 CredentialManager 中实现逻辑，此处保持结构)
 
         # 2. 从环境变量 COOKIES 加载，支持用 | 分隔多个
         cookies_env = os.getenv("COOKIES")
