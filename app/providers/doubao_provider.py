@@ -73,7 +73,7 @@ class DoubaoProvider(BaseProvider):
         """
         根据请求中的 'stream' 参数，分发到流式或非流式处理函数。
         """
-        is_stream = request_data.get("stream", True)
+        is_stream = request_data.get("stream", False)
 
         if is_stream:
             return StreamingResponse(self._stream_generator(request_data), media_type="text/event-stream")
@@ -298,6 +298,25 @@ class DoubaoProvider(BaseProvider):
             is_sys_err = "系统错误" in err_str or "710022019" in err_str or "710022013" in err_str
             # 故障即切换
             self.credential_manager.report_failure(permanent=is_sys_err)
+            
+            # 核心修复: 必须返回标准的 JSON 错误响应，否则前端会因为收到非 JSON(SSE) 数据而报错
+            return JSONResponse(
+                status_code=200, # 保持兼容性，或者 500
+                content={
+                    "id": request_id,
+                    "object": "chat.completion",
+                    "created": int(time.time()),
+                    "model": user_model if 'user_model' in locals() else "unknown",
+                    "choices": [{
+                        "index": 0, 
+                        "message": {
+                            "role": "assistant", 
+                            "content": f"豆包 API 错误: {err_str}"
+                        }, 
+                        "finish_reason": "stop"
+                    }]
+                }
+            )
             
             status_code = 500
             if "710022004" in err_str: status_code = 429
