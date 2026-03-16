@@ -26,11 +26,10 @@ class CredentialManager:
         # 统计当前可用数量
         creds = self._load_from_json("cookies.json")
         if not creds:
-            logger.warning("未找到任何预设凭证，系统将尝试进入 [零配置启动] 模式。")
-            self._check_and_refill(is_initial=True)
-        else:
-            self._initial_fetch_event.set()
-            logger.info(f"凭证管理器已初始化，活跃池共计 {len(creds)} 个凭证。")
+            logger.warning("未找到任何可用凭证，请确保 cookies.json 存在或已配置环境变量。")
+        
+        self._initial_fetch_event.set()
+        logger.info(f"凭证管理器已初始化，活跃池共计 {len(creds)} 个凭证。")
 
     def _load_from_json(self, filename: str) -> List[Dict[str, Any]]:
         """从指定 JSON 文件加载凭证"""
@@ -177,8 +176,7 @@ class CredentialManager:
         with self.lock:
             creds = self._load_from_json("cookies.json")
             if not creds:
-                self._check_and_refill()
-                raise ValueError("未找到可用凭证，系统正在抓取中...")
+                raise ValueError("未找到可用凭证，请检查 cookies.json 是否已配置到位。")
             self.index %= len(creds)
             cred = creds[self.index]
             logger.debug(f"正在获取凭证: 索引 [{self.index}/{len(creds)-1}], Cookie: {cred.get('cookie', '')[:10]}...")
@@ -218,7 +216,7 @@ class CredentialManager:
                         creds.remove(cred)
                     break
             self._save_list_to_json(creds, "cookies.json")
-            self._check_and_refill()
+            self._save_list_to_json(creds, "cookies.json")
 
     def _move_to_invalid(self, cred: Dict[str, Any]):
         """移至冷宫"""
@@ -238,24 +236,9 @@ class CredentialManager:
 
     def _save_to_json(self): pass
 
-    def _check_and_refill(self, is_initial=False):
-        """异步补货"""
-        if not settings.AUTO_FILL and not is_initial: return
-        creds = self._load_from_json("cookies.json")
-        if len(creds) < settings.COOKIE_NUM:
-            if not settings.AUTO_FILL and is_initial:
-                self._initial_fetch_event.set()
-                return
-            logger.info("触发自动补货抓取...")
-            def run():
-                env = os.environ.copy()
-                env["COOKIE_NUM"] = str(settings.COOKIE_NUM - len(creds))
-                subprocess.run([sys.executable, "cookie-fetch.py"], env=env)
-                if is_initial: self._initial_fetch_event.set()
-            threading.Thread(target=run, daemon=True).start()
-
     def wait_for_initial_fetch(self, timeout=60):
-        return self._initial_fetch_event.wait(timeout=timeout) if not self._initial_fetch_event.is_set() else True
+        # 补货已禁用，直接返回 True
+        return True
 
     def update_persistence(self, cookie: str, conversation_id: str, query_id: str):
         with self.lock:
