@@ -380,36 +380,53 @@ class DoubaoProvider(BaseProvider):
                 final_cookie = self._get_dynamic_cookie(cred_obj)
                 base_url = "https://www.doubao.com/chat/completion"
                 
-                # 动态获取指纹
+                # 动态获取指纹 (根据 FORCE_FETCH_URL 决定是否允许硬编码兜底)
                 web_tab_id = str(uuid.uuid4())
+                
+                # --- 获取核心指纹参数 ---
+                # 逻辑: 1. 优先从凭证对象取 (如果包含) 
+                #       2. 如果凭证没有且 FORCE_FETCH_URL=True，尝试从全局指纹池取 (包含环境变量兜底)
+                #       3. 最后使用配置中的静态硬编码默认值
+                
+                target_fp_url = None
+                if settings.FORCE_FETCH_URL:
+                    target_fp_url = self.credential_manager.current_fp_url
+                
+                device_id = cred_obj.get("device_id")
+                fp = cred_obj.get("fp")
+                tea_uuid = cred_obj.get("tea_uuid")
+                web_id = cred_obj.get("web_id")
+
+                if settings.FORCE_FETCH_URL and target_fp_url:
+                    try:
+                        from urllib.parse import urlparse, parse_qs
+                        parsed = urlparse(target_fp_url)
+                        params = parse_qs(parsed.query)
+                        if "device_id" in params: device_id = params["device_id"][0]
+                        if "fp" in params: fp = params["fp"][0]
+                        if "tea_uuid" in params: tea_uuid = params["tea_uuid"][0]
+                        if "web_id" in params: web_id = params["web_id"][0]
+                        logger.debug(f"已从全局指纹池提取参数: device_id={device_id[:10]}...")
+                    except Exception as e:
+                        logger.error(f"解析全局指纹 URL 出错: {e}")
+
                 base_params = {
                     "aid": "497858",
-                    "device_id": cred_obj.get("device_id") or settings.DOUBAO_DEVICE_ID or "7600236600187471401",
+                    "device_id": device_id or settings.DOUBAO_DEVICE_ID,
                     "device_platform": "web",
-                    "fp": cred_obj.get("fp") or settings.DOUBAO_FP or "verify_mkxf3p9i_hUn2VGVE_y5cH_4yp9_BjK6_iNSvN3wCyROz",
+                    "fp": fp or settings.DOUBAO_FP,
                     "language": "zh",
                     "pc_version": settings.DOUBAO_PC_VERSION,
                     "pkg_type": "release_version",
                     "real_aid": "497858",
                     "region": "", "samantha_web": "1", "sys_region": "",
-                    "tea_uuid": cred_obj.get("tea_uuid") or settings.DOUBAO_TEA_UUID or "7468737889876035084",
+                    "tea_uuid": tea_uuid or settings.DOUBAO_TEA_UUID,
                     "use-olympus-account": "1", "version_code": "20800",
-                    "web_id": cred_obj.get("web_id") or settings.DOUBAO_WEB_ID or "7468737889876035084",
+                    "web_id": web_id or settings.DOUBAO_WEB_ID,
                     "web_tab_id": web_tab_id,
-                    "msToken": self.playwright_manager.ms_token # 同步到 URL
+                    "msToken": self.playwright_manager.ms_token
                 }
 
-                # --- 核心逻辑: 注入全局指纹池中的参数 ---
-                if settings.FORCE_FETCH_URL and self.credential_manager.current_fp_url:
-                    try:
-                        from urllib.parse import urlparse, parse_qs
-                        parsed = urlparse(self.credential_manager.current_fp_url)
-                        params = parse_qs(parsed.query)
-                        for k, attr_name in {"device_id": "device_id", "fp": "fp", "tea_uuid": "tea_uuid", "web_id": "web_id"}.items():
-                            if k in params and params[k]:
-                                cred_obj[k] = params[k][0]
-                        logger.debug(f"尝试 {attempt+1}: 已将指纹池中的全局指纹注入当前请求。")
-                    except: pass
 
                 headers = self._prepare_headers(final_cookie)
                 payload = await self._prepare_payload(messages, bot_id, conversation_id, user_model, cred_obj, final_cookie)
