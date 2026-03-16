@@ -152,13 +152,6 @@ class CredentialManager:
                 json.dump(self.fingerprint_pool, f, indent=4, ensure_ascii=False)
         except: pass
 
-    def _check_and_refill_fingerprints(self):
-        """手动触发抓取 (不再由系统自动调用)"""
-        logger.info("准备手动启动抓取新指纹工具...")
-        def run():
-            subprocess.run([sys.executable, "fetch-url.py"])
-            self._load_fingerprints()
-        threading.Thread(target=run, daemon=True).start()
 
     def _augment_with_url_params(self, item: Dict[str, Any]) -> Dict[str, Any]:
         """从 URL 提取指纹"""
@@ -205,7 +198,6 @@ class CredentialManager:
                     logger.error("检测到指纹级限流 (710022004)，正在触发指纹轮换...")
                     self.rotate_fingerprint()
 
-            self._check_and_refill()
 
     def report_success(self, cookie: str):
         """更新使用计数"""
@@ -217,7 +209,6 @@ class CredentialManager:
                     if cred.get("is_anonymous") and cred["current_usage"] >= settings.COOKIE_TIMES:
                         creds.remove(cred)
                     break
-            self._save_list_to_json(creds, "cookies.json")
             self._save_list_to_json(creds, "cookies.json")
 
     def _move_to_invalid(self, cred: Dict[str, Any]):
