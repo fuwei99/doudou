@@ -126,16 +126,18 @@ class CredentialManager:
     def rotate_fingerprint(self):
         """轮换指纹"""
         with self.lock:
+            # 如果池子已经空了
             if not self.fingerprint_pool:
-                logger.warning("指纹池为空，触发自动补货...")
-                self._check_and_refill_fingerprints()
+                self.current_fp_url = settings.DOUBAO_FETCH_URL
+                logger.warning("指纹池已空，已尝试回退至环境变量中的默认指纹。")
                 return
 
-            # 移除旧指纹 (如果是由于限流触发的)
+            # 如果当前指纹在池子里，移除它（通常是因为它被限流了）
             if self.current_fp_url in self.fingerprint_pool:
                 self.fingerprint_pool.remove(self.current_fp_url)
                 self._save_fingerprints()
             
+            # 如果移除后池子还有剩下的，取下一个
             if self.fingerprint_pool:
                 self.current_fp_url = self.fingerprint_pool[0]
                 logger.success(f"已轮换到新指纹，剩余可用指纹: {len(self.fingerprint_pool)}")
