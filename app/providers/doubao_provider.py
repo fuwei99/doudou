@@ -522,6 +522,12 @@ class DoubaoProvider(BaseProvider):
             try:
                 session_id = request_data.get("user", f"session-{uuid.uuid4().hex}")
                 messages = request_data.get("messages", [])
+                tools = request_data.get("tools", [])
+                
+                if tools:
+                    sys_prompt = format_tools_to_system_prompt(tools)
+                    messages = [{"role": "system", "content": sys_prompt}] + messages
+
                 bot_id = settings.MODEL_MAPPING.get(user_model)
 
                 if not bot_id:
