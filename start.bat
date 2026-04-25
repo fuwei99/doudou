@@ -37,9 +37,23 @@ call .venv\Scripts\activate
 python -m pip install --upgrade pip -i https://pypi.tuna.tsinghua.edu.cn/simple
 pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
 
-:: 4. 安装 Playwright 浏览器
-echo [4/5] 正在检查 Playwright 浏览器组件...
+:: 4. Playwright 浏览器 (仅用于 cookie-fetch 等辅助脚本)
+echo [4/5] 正在检查 Playwright 浏览器组件 (用于辅助脚本)...
 playwright install chromium
+
+:: 4.5 检查本机 Chrome
+echo [4.5] 主服务将通过 CDP 连接本机 Chrome 浏览器 (首次使用自动启动)
+echo       浏览器数据持久化在 chrome_data 目录，无需每次重新登录。
+where chrome >nul 2>&1
+if %errorlevel% neq 0 (
+    if exist "%ProgramFiles%\Google\Chrome\Application\chrome.exe" (
+        echo       [OK] 已找到 Chrome: %ProgramFiles%\Google\Chrome\Application\chrome.exe
+    ) else (
+        echo       [提示] 未在默认路径找到 Chrome，请确保已安装 Chrome 或在 .env 中设置 CHROME_PATH。
+    )
+) else (
+    echo       [OK] Chrome 已在 PATH 中。
+)
 
 :: 5. 配置文件检查
 if not exist .env (
