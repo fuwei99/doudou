@@ -13,16 +13,21 @@ def create_chat_completion_chunk(
     model: str,
     content: str = "",
     finish_reason: Optional[str] = None,
-    reasoning_content: Optional[str] = None
+    reasoning_content: Optional[str] = None,
+    tool_calls: Optional[list] = None
 ) -> Dict[str, Any]:
     delta = {}
     if content:
         delta["content"] = content
     if reasoning_content:
         delta["reasoning_content"] = reasoning_content
-    # 如果都为空（比如 finish 时），至少保留 content 键
-    if not delta:
+    if tool_calls:
+        delta["tool_calls"] = tool_calls
+        
+    # 如果都为空（比如 finish 时且没有工具调用），至少保留 content 键
+    if not delta and not finish_reason:
         delta["content"] = content
+        
     return {
         "id": request_id,
         "object": "chat.completion.chunk",
@@ -33,30 +38,6 @@ def create_chat_completion_chunk(
                 "index": 0,
                 "delta": delta,
                 "finish_reason": finish_reason
-            }
-        ]
-    }
-
-def create_chat_completion_tool_calls_chunk(
-    request_id: str,
-    model: str,
-    tool_calls: list
-) -> Dict[str, Any]:
-    """
-    构造包含工具调用的 OpenAI 流式数据块。
-    """
-    return {
-        "id": request_id,
-        "object": "chat.completion.chunk",
-        "created": int(time.time()),
-        "model": model,
-        "choices": [
-            {
-                "index": 0,
-                "delta": {
-                    "tool_calls": tool_calls
-                },
-                "finish_reason": None
             }
         ]
     }

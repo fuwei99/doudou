@@ -15,10 +15,10 @@ from app.providers.base_provider import BaseProvider
 from app.services.credential_manager import CredentialManager
 from app.services.playwright_manager import PlaywrightManager
 from app.services.session_manager import SessionManager
-from app.utils.sse_utils import create_sse_data, create_chat_completion_chunk, create_chat_completion_tool_calls_chunk, DONE_CHUNK
+from app.utils.sse_utils import create_sse_data, create_chat_completion_chunk, DONE_CHUNK
 from app.utils.message_convert import convert_messages_to_prompt
+from app.utils.tool_utils import process_messages_for_tools, format_tools_to_system_prompt, parse_tool_calls_robust
 from app.utils.image_upload import FileUploader
-from app.utils.tool_utils import format_tools_to_system_prompt, parse_tool_calls_robust
 
 
 class DoubaoProvider(BaseProvider):
@@ -128,12 +128,7 @@ class DoubaoProvider(BaseProvider):
                 "msToken": self.playwright_manager.ms_token # 同步 URL 里的 msToken
             }
             headers = self._prepare_headers(final_cookie)
-            
-            # --- 核心逻辑: 获取 tools 并注入 Prompt ---
-            tools = request_data.get("tools", [])
-            tool_system_prompt = format_tools_to_system_prompt(tools)
-            
-            payload = await self._prepare_payload(messages, bot_id, conversation_id, user_model, cred_obj, final_cookie, tool_system_prompt)
+            payload = await self._prepare_payload(messages, bot_id, conversation_id, user_model, cred_obj, final_cookie, tools=request_data.get("tools"))
 
             log_headers = headers.copy()
             log_headers["Cookie"] = "[REDACTED FOR SECURITY]"
@@ -277,30 +272,43 @@ class DoubaoProvider(BaseProvider):
                 final_text = "".join(full_content)
                 final_reasoning_text = "".join(full_reasoning_content)
 
+                # --- Tool Call 解析 ---
+                parsed_calls = parse_tool_calls_robust(final_text)
+                openai_tool_calls = []
+                if parsed_calls:
+                    for i, call in enumerate(parsed_calls):
+                        openai_tool_calls.append({
+                            "id": f"call_{i}_{int(time.time())}",
+                            "type": "function",
+                            "function": {
+                                "name": call["name"],
+                                "arguments": json.dumps(call["args"], ensure_ascii=False)
+                            }
+                        })
+                    # 清理正文中的 XML 标签
+                    final_text = re.sub(r'<tool_calls>.*?</tool_calls>', '', final_text, flags=re.DOTALL).strip()
+
                 # 按照用户要求，将完整的响应内容打印到终端
                 print("\n--- [非流式] 完整响应内容 ---")
                 if final_reasoning_text:
                     print(f"[思考过程]:\n{final_reasoning_text}\n")
+                if openai_tool_calls:
+                    print(f"[工具调用]:\n{json.dumps(openai_tool_calls, indent=2, ensure_ascii=False)}")
                 print(f"[回答内容]:\n{final_text}")
                 print("---------------------------------\n")
 
                 message_data = {"role": "assistant", "content": final_text}
                 if final_reasoning_text:
                     message_data["reasoning_content"] = final_reasoning_text
-
-                # --- 核心逻辑: 解析 Tool Calls ---
-                tool_calls = parse_tool_calls_robust(final_text)
-                if tool_calls:
-                    message_data["tool_calls"] = tool_calls
-                    # 如果只有 tool_calls，通常 content 可以设为 None/空
-                    # 也可以保留原始 XML 文本，取决于客户端偏好
+                if openai_tool_calls:
+                    message_data["tool_calls"] = openai_tool_calls
 
                 return JSONResponse(content={
                     "id": request_id,
                     "object": "chat.completion",
                     "created": int(time.time()),
                     "model": user_model,
-                    "choices": [{"index": 0, "message": message_data, "finish_reason": "tool_calls" if tool_calls else "stop"}],
+                    "choices": [{"index": 0, "message": message_data, "finish_reason": "stop"}],
                     "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
                 })
 
@@ -344,11 +352,16 @@ class DoubaoProvider(BaseProvider):
                 conversation_id = session_data.get("conversation_id", "0")
                 is_new_conversation = conversation_id == "0"
                 new_conversation_id = None
-                is_thinking = False
+                streamed_any_data = False
                 
-                # --- 核心逻辑: 维护全量文本用于解析 Tool Calls ---
-                accumulated_text = ""
-                is_tool_calling_mode = False # 是否进入了 XML 工具调用模式（用于拦截显示）
+                # --- Tool Call 状态 ---
+                tool_state = {
+                    "text_buffer": "",
+                    "in_tool_call": False,
+                    "tool_call_index": 0,
+                    "streamed_to_client": False,
+                    "is_thinking": False
+                }
 
                 cred_obj = self.credential_manager.get_credential()
                 final_cookie = self._get_dynamic_cookie(cred_obj)
@@ -373,12 +386,7 @@ class DoubaoProvider(BaseProvider):
                     "msToken": self.playwright_manager.ms_token # 同步到 URL
                 }
                 headers = self._prepare_headers(final_cookie)
-                
-                # --- 核心逻辑: 获取 tools 并注入 Prompt ---
-                tools = request_data.get("tools", [])
-                tool_system_prompt = format_tools_to_system_prompt(tools)
-
-                payload = await self._prepare_payload(messages, bot_id, conversation_id, user_model, cred_obj, final_cookie, tool_system_prompt)
+                payload = await self._prepare_payload(messages, bot_id, conversation_id, user_model, cred_obj, final_cookie, tools=request_data.get("tools"))
 
                 logger.info("--- 准备向上游发送请求 (流式) ---")
                 
@@ -397,6 +405,13 @@ class DoubaoProvider(BaseProvider):
                         line = line.strip()
                         if not line: continue
                         
+                        # 打印原始 SSE 行，方便调试
+                        logger.debug(f"上游原始响应: {line}")
+                        if line.startswith("data:"):
+                            print(f"\n[Raw Data]: {line}") # 显式打印到终端
+                            
+                        streamed_any_data = True
+                        
                         if line.startswith("event:"):
                             current_event = line[len("event:"):].strip()
                             continue
@@ -408,84 +423,129 @@ class DoubaoProvider(BaseProvider):
                             try:
                                 data = json.loads(content_str)
                                 
+                                # 检查是否有 error_code
                                 if "error_code" in data:
                                     raise Exception(f"豆包 API 错误: {data.get('error_code')} - {data.get('error_msg')}")
 
                                 if current_event == "SSE_ACK":
                                     ack_meta = data.get("ack_client_meta", {})
                                     new_conversation_id = ack_meta.get("conversation_id")
-                                    if is_new_conversation and new_conversation_id:
-                                        self.session_manager.update_session(session_id, {"conversation_id": new_conversation_id})
+                                    
+                                    # --- 关键: 捕获用于 Edit 模式的 Question ID (持久化) ---
+                                    query_list = data.get("query_list", [])
+                                    if query_list and new_conversation_id:
+                                        server_query_id = query_list[0].get("question_id")
+                                        if server_query_id:
+                                            logger.success(f"捕获到持久化 ID: Conv={new_conversation_id}, Query={server_query_id}")
+                                            self.credential_manager.update_persistence(
+                                                cred_obj["cookie"], 
+                                                new_conversation_id, 
+                                                server_query_id
+                                            )
                                         
                                 elif current_event in ["STREAM_MSG_NOTIFY", "STREAM_CHUNK"]:
+                                    packet_extracted_text = False # 单包内去重
+
+                                    # --- 优先从 model_content 提取 ---
                                     content_obj = data.get("content", {})
                                     m_content = content_obj.get("model_content")
                                     if m_content:
-                                        accumulated_text += m_content
-                                        if "<tool_calls>" in accumulated_text: is_tool_calling_mode = True
-                                        
-                                        if not is_tool_calling_mode:
-                                            chunk = create_chat_completion_chunk(request_id, user_model, content=m_content)
-                                            yield create_sse_data(chunk)
-                                            streamed_to_client = True
-                                        print(m_content, end="", flush=True)
+                                        if m_content.strip() == self.FORBIDDEN_PLACEHOLDER:
+                                            logger.info("检测到审核垫片消息（model_content），已拦截屏蔽")
+                                        else:
+                                            print(m_content, end="", flush=True)
+                                            async for chunk in self._handle_stream_text_interception(m_content, request_id, user_model, tool_state):
+                                                yield chunk
+                                            packet_extracted_text = True
 
+                                    # --- 处理补丁操作 (patch_op) ---
                                     patch_ops = data.get("patch_op", [])
                                     for op in patch_ops:
                                         blocks = op.get("patch_value", {}).get("content_block", [])
+                                        # 优先更新思考状态
                                         for block in blocks:
                                             if block.get("block_type") == 10040:
-                                                is_thinking = not block.get("is_finish", False)
+                                                tool_state["is_thinking"] = not block.get("is_finish", False)
+
+                                        for block in blocks:
+                                            # 核心修复：提取 patch 里的文字块
                                             if block.get("block_type") == 10000:
                                                 txt = block.get("content", {}).get("text_block", {}).get("text")
-                                                if txt:
-                                                    accumulated_text += txt
-                                                    if "<tool_calls>" in accumulated_text: is_tool_calling_mode = True
-                                                    
-                                                    if not is_tool_calling_mode:
-                                                        if is_thinking:
-                                                            chunk = create_chat_completion_chunk(request_id, user_model, content="", reasoning_content=txt)
-                                                        else:
-                                                            chunk = create_chat_completion_chunk(request_id, user_model, content=txt)
-                                                        yield create_sse_data(chunk)
-                                                        streamed_to_client = True
+                                                if txt and not packet_extracted_text:
+                                                    if txt.strip() == self.FORBIDDEN_PLACEHOLDER:
+                                                        logger.info("检测到审核垫片消息（patch_op），已拦截屏蔽")
+                                                    else:
+                                                        print(txt, end="", flush=True)
+                                                        async for chunk in self._handle_stream_text_interception(txt, request_id, user_model, tool_state):
+                                                            yield chunk
+                                                        packet_extracted_text = True
+                                                
+                                        # 处理图片逻辑
+                                        image_urls = self._extract_image_urls(blocks)
+                                        for url in image_urls:
+                                            img_md = f"\n\n![图片]({url})"
+                                            async for chunk in self._handle_stream_text_interception(img_md, request_id, user_model, tool_state):
+                                                yield chunk
+
+                                    # --- 处理普通 content_block (兜底文字) ---
+                                    content_blocks = data.get("content", {}).get("content_block", [])
+                                    for block in content_blocks:
+                                        # 提取文字块
+                                        if block.get("block_type") == 10000:
+                                            txt = block.get("content", {}).get("text_block", {}).get("text")
+                                            if txt and not packet_extracted_text:
+                                                if txt.strip() == self.FORBIDDEN_PLACEHOLDER:
+                                                    logger.info("检测到审核垫片消息（content_block），已拦截屏蔽")
+                                                else:
                                                     print(txt, end="", flush=True)
+                                                    async for chunk in self._handle_stream_text_interception(txt, request_id, user_model, tool_state):
+                                                        yield chunk
+                                                    packet_extracted_text = True
+                                        
+                                        # 提取思考状态
+                                        if block.get("block_type") == 10040:
+                                            tool_state["is_thinking"] = not block.get("is_finish", False)
+                                            
+                                    image_urls = self._extract_image_urls(content_blocks)
+                                    for url in image_urls:
+                                        img_md = f"\n\n![图片]({url})"
+                                        async for chunk in self._handle_stream_text_interception(img_md, request_id, user_model, tool_state):
+                                            yield chunk
 
                                 elif current_event == "CHUNK_DELTA":
                                     delta_content = data.get("text", "")
                                     if delta_content:
-                                        accumulated_text += delta_content
-                                        if "<tool_calls>" in accumulated_text: is_tool_calling_mode = True
-
-                                        if not is_tool_calling_mode:
-                                            if is_thinking:
-                                                chunk = create_chat_completion_chunk(request_id, user_model, content="", reasoning_content=delta_content)
-                                            else:
-                                                chunk = create_chat_completion_chunk(request_id, user_model, content=delta_content)
-                                            yield create_sse_data(chunk)
-                                            streamed_to_client = True
-                                        print(delta_content, end="", flush=True)
-
+                                        if delta_content.strip() == self.FORBIDDEN_PLACEHOLDER:
+                                            logger.info("检测到审核垫片消息（CHUNK_DELTA），已拦截屏蔽")
+                                        else:
+                                            print(delta_content, end="", flush=True)
+                                            async for chunk in self._handle_stream_text_interception(delta_content, request_id, user_model, tool_state):
+                                                yield chunk
+                            except json.JSONDecodeError:
+                                continue
                             except Exception as e:
-                                if "豆包 API 错误" in str(e): raise e
+                                # 确保业务错误被抛出到外层重试逻辑
+                                if "豆包 API 错误" in str(e):
+                                    raise e
+                                logger.error(f"解析流式数据出错: {str(e)}")
                                 continue
 
-                # --- 核心逻辑: 流结束后全量解析并下发 Tool Calls ---
-                tool_calls = parse_tool_calls_robust(accumulated_text)
-                if tool_calls:
-                    # 下发 tool_calls chunk
-                    tc_chunk = create_chat_completion_tool_calls_chunk(request_id, user_model, tool_calls)
-                    yield create_sse_data(tc_chunk)
-                    streamed_to_client = True
-                    print("\n[Detected Tool Calls]:", json.dumps(tool_calls, indent=2, ensure_ascii=False))
+                # 扫尾：如果 buffer 里还有没发出的文字，强制发出
+                if tool_state["text_buffer"]:
+                    yield create_sse_data(create_chat_completion_chunk(request_id, user_model, content=tool_state["text_buffer"]))
+                    tool_state["streamed_to_client"] = True
 
-                if not streamed_to_client and not is_tool_calling_mode:
+                if not tool_state["streamed_to_client"]:
+                    # 无论是否是新会话，只要没产生实际输出，通通报错告知外层换号。
                     raise Exception("上游服务器响应成功但未返回有效文字内容")
 
+                # 成功结束
                 self.credential_manager.report_success(cred_obj["cookie"])
                 print("\n--------------------------\n")
-                
-                final_chunk = create_chat_completion_chunk(request_id, user_model, "", "tool_calls" if tool_calls else "stop")
+                if is_new_conversation and new_conversation_id:
+                    self.session_manager.update_session(session_id, {"conversation_id": new_conversation_id})
+
+                final_chunk = create_chat_completion_chunk(request_id, user_model, "", "stop")
                 yield create_sse_data(final_chunk)
                 yield DONE_CHUNK
                 return 
@@ -494,28 +554,7 @@ class DoubaoProvider(BaseProvider):
             err_str = str(e)
             logger.error(f"流式请求失败: {err_str[:100]}")
             
-            if streamed_to_client:
-                # 一旦开始吐字，无法切换账号，直接报错
-                error_chunk = create_chat_completion_chunk(request_id, user_model, f"\n\n[流式中途出错]: {err_str}", "stop")
-                yield create_sse_data(error_chunk)
-                yield DONE_CHUNK
-                return
-
-            # 判定是否需要永久删除
-            is_sys_err = "系统错误" in err_str or "710022019" in err_str or "710022013" in err_str
-            
-            # 故障即切换
-            self.credential_manager.report_failure(permanent=is_sys_err)
-            
-            error_chunk = create_chat_completion_chunk(request_id, user_model, f"请求失败: {err_str}", "stop")
-            yield create_sse_data(error_chunk)
-            yield DONE_CHUNK
-
-        except Exception as e:
-            err_str = str(e)
-            logger.error(f"流式请求失败: {err_str[:100]}")
-            
-            if streamed_to_client:
+            if tool_state["streamed_to_client"]:
                 # 一旦开始吐字，无法切换账号，直接报错
                 error_chunk = create_chat_completion_chunk(request_id, user_model, f"\n\n[流式中途出错]: {err_str}", "stop")
                 yield create_sse_data(error_chunk)
@@ -561,6 +600,79 @@ class DoubaoProvider(BaseProvider):
                             urls.append(ori["url"])
         return urls
 
+    async def _handle_stream_text_interception(self, new_text: str, request_id: str, user_model: str, state: dict):
+        """
+        拦截流式文本中的工具调用。
+        state 必须包含: text_buffer, in_tool_call, tool_call_index, streamed_to_client, is_thinking
+        """
+        if state.get("is_thinking"):
+            yield create_sse_data(create_chat_completion_chunk(request_id, user_model, content="", reasoning_content=new_text))
+            state["streamed_to_client"] = True
+            return
+
+        state["text_buffer"] += new_text
+        
+        while True:
+            if not state["in_tool_call"]:
+                start_tag = "<tool_calls>"
+                pos = state["text_buffer"].find(start_tag)
+                if pos != -1:
+                    before = state["text_buffer"][:pos]
+                    if before:
+                        yield create_sse_data(create_chat_completion_chunk(request_id, user_model, content=before))
+                        state["streamed_to_client"] = True
+                    state["in_tool_call"] = True
+                    state["text_buffer"] = state["text_buffer"][pos + len(start_tag):]
+                else:
+                    if "<" in state["text_buffer"]:
+                        last_lt = state["text_buffer"].rfind("<")
+                        # 如果后面可能有标签，暂存
+                        if len(state["text_buffer"]) - last_lt < len(start_tag):
+                            to_send = state["text_buffer"][:last_lt]
+                            state["text_buffer"] = state["text_buffer"][last_lt:]
+                        else:
+                            to_send = state["text_buffer"]
+                            state["text_buffer"] = ""
+                    else:
+                        to_send = state["text_buffer"]
+                        state["text_buffer"] = ""
+                    
+                    if to_send:
+                        yield create_sse_data(create_chat_completion_chunk(request_id, user_model, content=to_send))
+                        state["streamed_to_client"] = True
+                    break
+            else:
+                end_tag = "</tool_calls>"
+                pos = state["text_buffer"].find(end_tag)
+                if pos != -1:
+                    tool_content = state["text_buffer"][:pos]
+                    state["text_buffer"] = state["text_buffer"][pos + len(end_tag):]
+                    state["in_tool_call"] = False
+                    
+                    try:
+                        calls = parse_tool_calls_robust(tool_content.strip())
+                        for call in calls:
+                            t_name = call["name"]
+                            t_args = json.dumps(call["args"], ensure_ascii=False)
+                            
+                            delta_tool_calls = [{
+                                "index": state["tool_call_index"],
+                                "id": f"call_{state['tool_call_index']}_{int(time.time())}",
+                                "type": "function",
+                                "function": {"name": t_name, "arguments": t_args}
+                            }]
+                            chunk = create_chat_completion_chunk(request_id, user_model, tool_calls=delta_tool_calls)
+                            yield create_sse_data(chunk)
+                            state["tool_call_index"] += 1
+                            state["streamed_to_client"] = True
+                    except Exception as e:
+                        logger.warning(f"流式解析工具调用失败: {e}")
+                        fallback = f"<tool_calls>{tool_content}</tool_calls>"
+                        yield create_sse_data(create_chat_completion_chunk(request_id, user_model, content=fallback))
+                        state["streamed_to_client"] = True
+                else:
+                    break
+
     def _prepare_headers(self, cookie: str) -> Dict[str, str]:
         # 严格参考 refer.txt 的 Header 结构
         return {
@@ -580,18 +692,30 @@ class DoubaoProvider(BaseProvider):
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36",
         }
 
-    async def _prepare_payload(self, messages: List[Dict[str, Any]], bot_id: str, conversation_id: str, user_model: str, cred_obj: Dict[str, Any], final_cookie: str, tool_system_prompt: str = "") -> Dict[str, Any]:
+    async def _prepare_payload(self, messages: List[Dict[str, Any]], bot_id: str, conversation_id: str, user_model: str, cred_obj: Dict[str, Any], final_cookie: str, tools: List[Dict[str, Any]] = None) -> Dict[str, Any]:
         """
         构造发送给上游豆包 API 的核心 Payload。
         支持多模态输入（检测最后一条消息中的图片）。
         """
+        # 0. 如果有 tools，处理消息历史并注入工具提示词
+        processed_messages = messages
+        tool_system_prompt = ""
+        if tools:
+            processed_messages = process_messages_for_tools(messages)
+            tool_system_prompt = format_tools_to_system_prompt(tools)
+            
+            # 找到 system 消息并注入，如果没有则新建
+            has_system = False
+            for m in processed_messages:
+                if m.get("role") == "system":
+                    m["content"] = (m.get("content") or "") + tool_system_prompt
+                    has_system = True
+                    break
+            if not has_system:
+                processed_messages.insert(0, {"role": "system", "content": tool_system_prompt})
+
         # 1. 提取文字 Prompt
-        # 如果有工具定义，则开启末尾锚点提醒 (Anchor Reminder)
-        full_prompt = convert_messages_to_prompt(messages, add_tool_reminder=bool(tool_system_prompt))
-        
-        # 如果有工具定义，注入到 Prompt 开头 (System Prompt Construction)
-        if tool_system_prompt:
-            full_prompt = f"{tool_system_prompt}\n\n{full_prompt}"
+        full_prompt = convert_messages_to_prompt(processed_messages)
         
         # 2. 检测最新的一条消息是否有图片
         image_uris = []

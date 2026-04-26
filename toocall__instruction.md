@@ -323,3 +323,150 @@ def process_messages_for_tools(messages: list) -> list:
         new_messages.append(msg)
     return new_messages
 ```
+
+### 解析实例代码(DSML XML 标签只是deepseek的实例，实际建设的时候不一定要用)
+
+Edited toocall__instruction.md
+
+在 `app.py` 中，关于**解析**模型输出（将 DSML XML 标签转换回 OpenAI JSON 格式）的代码分布在三个地方：核心解析函数、流式处理逻辑和非流式处理逻辑。
+
+以下是完整的源码实现：
+
+### 1. 核心解析函数 (Regex 实现)
+这是最底层的解析逻辑，负责从字符串中提取工具名和参数。
+
+```python
+def parse_dsml_tool_calls(text: str) -> list:
+    """
+    解析 DeepSeek-V4 DSML 格式的多个工具调用。
+    返回: [{"name": str, "args": dict}, ...]
+    """
+    results = []
+    
+    # 查找所有的 invoke 块
+    invoke_pattern = re.compile(r'<|DSML|invoke name=["\']([^"\']+)["\']>(.*?)</|DSML|invoke>', re.DOTALL)
+    # 增强版参数匹配，利用正向肯定断言解决模型可能漏写闭合标签的问题
+    param_pattern = re.compile(r'<|DSML|parameter name=["\']([^"\']+)["\']\s+string=["\'](true|false)["\']>(.*?)(?:</|DSML|parameter>|(?=</|DSML|invoke>)|(?=</|DSML|tool_calls>)|$)', re.DOTALL)
+    
+    for inv_match in invoke_pattern.finditer(text):
+        tool_name = inv_match.group(1).strip()
+        inv_content = inv_match.group(2)
+        
+        args = {}
+        for pm in param_pattern.finditer(inv_content):
+            p_name = pm.group(1).strip()
+            is_string = pm.group(2).lower() == "true"
+            p_val = pm.group(3).strip()
+            
+            if is_string:
+                args[p_name] = p_val
+            else:
+                try:
+                    args[p_name] = json.loads(p_val)
+                except:
+                    args[p_name] = p_val
+        
+        if tool_name:
+            results.append({"name": tool_name, "args": args})
+            
+    return results
+```
+
+### 2. 流式响应解析 (SSE Stream)
+这段代码位于 `sse_stream()` 内部，它像一个“拦截器”，实时监控文本流，发现标签时进入缓冲模式。
+
+```python
+# 约 1916 - 1984 行 (sse_stream 内部)
+while len(text_buffer) > 0:
+    if not in_tool_call:
+        # 寻找开始标签
+        pos = text_buffer.find("<|DSML|tool_calls>")
+        if pos != -1:
+            before_text = text_buffer[:pos]
+            if before_text:
+                # 发送标签前的普通文本
+                new_choices.append({"delta": {"content": before_text}, "index": 0})
+            in_tool_call = True
+            text_buffer = text_buffer[pos + len("<|DSML|tool_calls>"):]
+        else:
+            # 处理标签被截断的情况（如只收到了 "<|DSML|"）
+            # ... (缓冲安全处理代码) ...
+            break 
+    else:
+        # 寻找结束标签
+        pos = text_buffer.find("</|DSML|tool_calls>")
+        if pos != -1:
+            tool_content = text_buffer[:pos]
+            text_buffer = text_buffer[pos + len("</|DSML|tool_calls>"):]
+            in_tool_call = False
+            
+            try:
+                # 调用核心解析函数
+                calls = parse_dsml_tool_calls(tool_content.strip())
+                for call in calls:
+                    t_name = call["name"]
+                    t_args = json.dumps(call["args"], ensure_ascii=False)
+                    
+                    # 构造标准 OpenAI Tool Call Chunk
+                    delta_obj = {
+                        "tool_calls": [{
+                            "index": tool_call_index,
+                            "id": f"call_{tool_call_index}_{int(time.time())}",
+                            "type": "function",
+                            "function": {"name": t_name, "arguments": t_args}
+                        }]
+                    }
+                    new_choices.append({"delta": delta_obj, "index": 0})
+                    tool_call_index += 1
+            except Exception as e:
+                # 解析失败时作为普通文本降级输出
+                logger.warning(f"Failed to parse DSML call: {e}")
+                fallback_text = f"\n<|DSML|tool_calls>{tool_content}</|DSML|tool_calls>\n"
+                new_choices.append({"delta": {"content": fallback_text}, "index": 0})
+        else:
+            break # 继续等待结束标签
+```
+
+### 3. 非流式响应解析 (Collect Data)
+这是当模型回答完所有内容后，一次性扫描全文进行解析的逻辑。
+
+```python
+# 约 2164 - 2195 行 (collect_data 内部)
+# --- 检测并解析 tool_calls ---
+tool_calls = []
+
+# 这里展示了对通用标签 <tool_call> 的兼容解析（用于迁移或旧版本）
+while "<tool_call>" in final_content and "</tool_call>" in final_content:
+    start_idx = final_content.find("<tool_call>")
+    end_idx = final_content.find("</tool_call>", start_idx)
+    if end_idx == -1: break
+    
+    json_str = final_content[start_idx + len("<tool_call>"):end_idx].strip()
+    
+    try:
+        # 此时尝试作为 JSON 解析（如果模型输出了 JSON 块）
+        parsed = json.loads(json_str)
+        args = parsed.get("arguments", "{}")
+        if isinstance(args, dict):
+            args = json.dumps(args, ensure_ascii=False)
+            
+        tool_calls.append({
+            "id": f"call_{len(tool_calls)}_{int(time.time())}",
+            "type": "function",
+            "function": {
+                "name": parsed.get("name", ""),
+                "arguments": args
+            }
+        })
+    except Exception as e:
+        logger.warning(f"解析 tool_call 失败: {json_str}, error: {e}")
+        
+    # 从正文中移除已提取的工具块
+    final_content = final_content[:start_idx] + final_content[end_idx + len("</tool_call>"):]
+```
+
+### 总结
+1.  **流式解析**采用的是“实时拦截 + 缓冲”模式，通过寻找 `DSML` 专用标签来触发。
+2.  **核心解析**采用了“断言正则”，能够精准处理不完整的 XML 结构。
+3.  **非流式解析**更像一个后置处理器，它甚至包含了一些对 `json` 直接封装在 `<tool_call>` 标签内的兼容逻辑。
+
