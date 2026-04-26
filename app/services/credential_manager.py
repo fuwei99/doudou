@@ -4,7 +4,7 @@ import glob
 import json
 import subprocess
 import sys
-from typing import List, Dict, Any, Union, Optional
+from typing import List, Dict, Any, Union
 from urllib.parse import urlparse, parse_qs
 from loguru import logger
 from app.core.config import settings
@@ -12,13 +12,8 @@ from app.core.config import settings
 class CredentialManager:
     def __init__(self, env_credentials: List[str]):
         self.index = 0
-        self.lock = threading.RLock()  # 使用递归锁，防止 report_failure 嵌套调用 rotate_fingerprint 时死锁
+        self.lock = threading.Lock()
         self._initial_fetch_event = threading.Event()
-        
-        # 指纹池管理
-        self.fingerprint_pool: List[str] = []
-        self.current_fp_url: Optional[str] = None
-        self._load_fingerprints()
         
         # 启动同步：整合环境变量、活跃池和黑名单
         self._sync_all_on_startup(env_credentials)
@@ -106,54 +101,6 @@ class CredentialManager:
             except Exception: pass
         return creds
 
-    def _load_fingerprints(self):
-        """加载指纹池"""
-        path = os.path.join(os.getcwd(), "fetch_url.json")
-        if os.path.exists(path):
-            try:
-                with open(path, "r", encoding="utf-8") as f:
-                    self.fingerprint_pool = json.load(f)
-                    if self.fingerprint_pool:
-                        self.current_fp_url = self.fingerprint_pool[0]
-                        logger.info(f"成功加载指纹池，共 {len(self.fingerprint_pool)} 个指纹。")
-            except Exception as e:
-                logger.error(f"加载指纹池失败: {e}")
-        
-        # 兜底：如果池为空但环境变量有设置，则使用环境变量的指纹
-        if not self.current_fp_url and settings.DOUBAO_FETCH_URL:
-            self.current_fp_url = settings.DOUBAO_FETCH_URL
-            logger.info("指纹池为空，已应用环境变量中的 DOUBAO_FETCH_URL。")
-
-    def rotate_fingerprint(self):
-        """轮换指纹"""
-        with self.lock:
-            # 如果池子已经空了
-            if not self.fingerprint_pool:
-                self.current_fp_url = settings.DOUBAO_FETCH_URL
-                logger.warning("指纹池已空，已尝试回退至环境变量中的默认指纹。")
-                return
-
-            # 如果当前指纹在池子里，移除它（通常是因为它被限流了）
-            if self.current_fp_url in self.fingerprint_pool:
-                self.fingerprint_pool.remove(self.current_fp_url)
-                self._save_fingerprints()
-            
-            # 如果移除后池子还有剩下的，取下一个
-            if self.fingerprint_pool:
-                self.current_fp_url = self.fingerprint_pool[0]
-                logger.success(f"已轮换到新指纹，剩余可用指纹: {len(self.fingerprint_pool)}")
-            else:
-                self.current_fp_url = settings.DOUBAO_FETCH_URL
-                logger.warning("指纹池已耗尽，已回退至环境变量中的默认指纹。")
-
-    def _save_fingerprints(self):
-        path = os.path.join(os.getcwd(), "fetch_url.json")
-        try:
-            with open(path, "w", encoding="utf-8") as f:
-                json.dump(self.fingerprint_pool, f, indent=4, ensure_ascii=False)
-        except: pass
-
-
     def _augment_with_url_params(self, item: Dict[str, Any]) -> Dict[str, Any]:
         """从 URL 提取指纹"""
         if settings.FORCE_FETCH_URL: return item
@@ -172,13 +119,14 @@ class CredentialManager:
         with self.lock:
             creds = self._load_from_json("cookies.json")
             if not creds:
-                raise ValueError("未找到可用凭证，请检查 cookies.json 是否已配置到位。")
+                self._check_and_refill()
+                raise ValueError("未找到可用凭证，系统正在抓取中...")
             self.index %= len(creds)
             cred = creds[self.index]
             logger.debug(f"正在获取凭证: 索引 [{self.index}/{len(creds)-1}], Cookie: {cred.get('cookie', '')[:10]}...")
             return cred
 
-    def report_failure(self, err_msg: str = "", permanent: bool = False):
+    def report_failure(self, permanent: bool = False):
         """上报失败并同步文件"""
         with self.lock:
             creds = self._load_from_json("cookies.json")
@@ -193,14 +141,7 @@ class CredentialManager:
                 old_index = self.index
                 self.index = (self.index + 1) % len(creds)
                 logger.warning(f"触发故障切号：索引 [{old_index}] -> [{self.index}]，活跃池总数: {len(creds)}")
-                
-                # --- 核心逻辑: 针对限流错误进行指纹轮换 ---
-                if "710022004" in err_msg or "rate limited" in err_msg.lower():
-                    logger.error("检测到指纹级限流 (710022004)，正在触发指纹轮换...")
-                    self.rotate_fingerprint()
-            
             self._check_and_refill()
-
 
     def report_success(self, cookie: str):
         """更新使用计数"""
@@ -234,14 +175,14 @@ class CredentialManager:
     def _save_to_json(self): pass
 
     def _check_and_refill(self, is_initial=False):
-        """异步补货 (仅针对 Cookie)"""
+        """异步补货"""
         if not settings.AUTO_FILL and not is_initial: return
         creds = self._load_from_json("cookies.json")
         if len(creds) < settings.COOKIE_NUM:
             if not settings.AUTO_FILL and is_initial:
                 self._initial_fetch_event.set()
                 return
-            logger.info("触发 Cookie 自动补货抓取...")
+            logger.info("触发自动补货抓取...")
             def run():
                 env = os.environ.copy()
                 env["COOKIE_NUM"] = str(settings.COOKIE_NUM - len(creds))
