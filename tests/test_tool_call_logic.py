@@ -67,16 +67,22 @@ def test_message_convert():
         {"role": "assistant", "content": "思索中...", "tool_calls": [
             {"function": {"name": "web_search", "arguments": '{"query": "豆包 API"}'}}
         ]},
-        {"role": "tool", "tool_call_id": "123", "content": "搜索结果：很好用"}
+        {"role": "user", "content": "帮我搜一下天气"}
     ]
-    prompt = convert_messages_to_prompt(messages)
-    print("\n--- Convert Message Prompt ---")
+    # 开启提醒
+    prompt = convert_messages_to_prompt(messages, add_tool_reminder=True)
+    print("\n--- Convert Message Prompt (With Reminder) ---")
     print(prompt)
-    assert "<tool_calls>" in prompt
-    assert "<tool_response" in prompt
+    assert "[TOOLCALL_FORMAT_REMINDER]" in prompt
+    assert "<invoke name=\"tool_name\">" in prompt
 
 if __name__ == "__main__":
-    test_format_tools()
-    test_parse_robust()
-    test_message_convert()
-    print("\n✅ All Logic Tests Passed!")
+    try:
+        test_format_tools()
+        test_parse_robust()
+        test_message_convert()
+        print("\nAll Logic Tests Passed!")
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)

@@ -256,3 +256,70 @@ def format_tools_to_system_prompt(tools: list) -> str:
 
 
 ``` 
+
+```历史对齐
+def _content_to_str(content) -> str:
+    """将 content 统一转换为字符串（兼容 OpenAI 多模态 list 格式）"""
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for block in content:
+            if isinstance(block, dict):
+                if block.get("type") == "text":
+                    parts.append(block.get("text", ""))
+                elif block.get("type") == "tool_result":
+                    parts.append(block.get("content", ""))
+                else:
+                    parts.append(str(block))
+            else:
+                parts.append(str(block))
+        return "\n".join(parts)
+    return str(content)
+
+def process_messages_for_tools(messages: list) -> list:
+    """处理带有 tool_calls 和 tool role 的消息（实现 History Alignment）"""
+    new_messages = []
+    for m in messages:
+        msg = dict(m)
+        
+        # 1. 先统一 content 为字符串，避免多模态 List 格式干扰后续拼接
+        if "content" in msg:
+            msg["content"] = _content_to_str(msg["content"])
+        
+        # 2. 如果是 assistant 消息且包含了 tool_calls，将其转回 DSML 格式
+        if msg.get("role") == "assistant" and msg.get("tool_calls"):
+            content = msg.get("content") or ""
+            for tc in msg.get("tool_calls"):
+                func = tc.get("function", {})
+                
+                args = func.get("arguments", {})
+                if isinstance(args, str):
+                    try:
+                        args = json.loads(args)
+                    except:
+                        pass
+                
+                # 关键步骤：序列化回 DSML XML 格式以提供连贯的上下文
+                dsml_call = "\n<|DSML|tool_calls>\n<|DSML|invoke name=\"{}\">\n".format(func.get("name"))
+                if isinstance(args, dict):
+                    for k, v in args.items():
+                        is_str = "true" if isinstance(v, str) else "false"
+                        # 处理复杂 JSON 参数或纯文本参数
+                        v_str = v if isinstance(v, str) else json.dumps(v, ensure_ascii=False)
+                        dsml_call += "  <|DSML|parameter name=\"{0}\" string=\"{1}\">{2}</|DSML|parameter>\n".format(k, is_str, v_str)
+                dsml_call += "</|DSML|invoke>\n</|DSML|tool_calls>\n"
+                content += dsml_call
+            msg["content"] = content.strip()
+            
+        # 3. 如果是 tool 结果回复（OpenAI 标准），转成 user 角色
+        if msg.get("role") == "tool":
+            msg["role"] = "user" # 网页版不接受 tool 角色，转换为 user 绕过
+            tool_content = _content_to_str(msg.get("content"))
+            msg["content"] = f"Tool result for {msg.get('tool_call_id', 'unknown')}:\n{tool_content}"
+            
+        new_messages.append(msg)
+    return new_messages
+```

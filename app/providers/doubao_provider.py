@@ -586,9 +586,10 @@ class DoubaoProvider(BaseProvider):
         支持多模态输入（检测最后一条消息中的图片）。
         """
         # 1. 提取文字 Prompt
-        full_prompt = convert_messages_to_prompt(messages)
+        # 如果有工具定义，则开启末尾锚点提醒 (Anchor Reminder)
+        full_prompt = convert_messages_to_prompt(messages, add_tool_reminder=bool(tool_system_prompt))
         
-        # 如果有工具定义，注入到 Prompt 开头
+        # 如果有工具定义，注入到 Prompt 开头 (System Prompt Construction)
         if tool_system_prompt:
             full_prompt = f"{tool_system_prompt}\n\n{full_prompt}"
         
