@@ -127,7 +127,8 @@ class DoubaoProvider(BaseProvider):
                 "msToken": self.playwright_manager.ms_token # 同步 URL 里的 msToken
             }
             headers = self._prepare_headers(final_cookie)
-            payload = await self._prepare_payload(messages, bot_id, conversation_id, user_model, cred_obj, final_cookie)
+            tools = request_data.get("tools")
+            payload = await self._prepare_payload(messages, bot_id, conversation_id, user_model, cred_obj, final_cookie, tools=tools)
 
             log_headers = headers.copy()
             log_headers["Cookie"] = "[REDACTED FOR SECURITY]"
@@ -278,16 +279,31 @@ class DoubaoProvider(BaseProvider):
                 print(f"[回答内容]:\n{final_text}")
                 print("---------------------------------\n")
 
+                # 检测工具调用
+                from app.utils.tool_utils import parse_tool_calls_robust, assemble_openai_tool_calls
+                parsed_calls = parse_tool_calls_robust(final_text)
+                
                 message_data = {"role": "assistant", "content": final_text}
                 if final_reasoning_text:
                     message_data["reasoning_content"] = final_reasoning_text
+
+                choice_data = {"index": 0, "message": message_data, "finish_reason": "stop"}
+                
+                if parsed_calls:
+                    logger.success(f"检测到工具调用: {parsed_calls}")
+                    choice_data["message"]["tool_calls"] = assemble_openai_tool_calls(parsed_calls)
+                    choice_data["finish_reason"] = "tool_calls"
+                    # 如果只有工具调用没有文字内容，有时 OpenAI 客户端希望 content 为 None 或空
+                    if not final_text.replace(final_text[final_text.find('<'):final_text.rfind('>')+1], "").strip():
+                        # 如果文本内容全是工具调用标签，则置空
+                        pass 
 
                 return JSONResponse(content={
                     "id": request_id,
                     "object": "chat.completion",
                     "created": int(time.time()),
                     "model": user_model,
-                    "choices": [{"index": 0, "message": message_data, "finish_reason": "stop"}],
+                    "choices": [choice_data],
                     "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
                 })
 
@@ -333,6 +349,10 @@ class DoubaoProvider(BaseProvider):
                 new_conversation_id = None
                 is_thinking = False
                 streamed_any_data = False
+                
+                # --- [Tool Call 模式变量] ---
+                is_tool_calling_mode = False
+                tool_call_buffer = []
 
                 cred_obj = self.credential_manager.get_credential()
                 final_cookie = self._get_dynamic_cookie(cred_obj)
@@ -357,7 +377,8 @@ class DoubaoProvider(BaseProvider):
                     "msToken": self.playwright_manager.ms_token # 同步到 URL
                 }
                 headers = self._prepare_headers(final_cookie)
-                payload = await self._prepare_payload(messages, bot_id, conversation_id, user_model, cred_obj, final_cookie)
+                tools = request_data.get("tools")
+                payload = await self._prepare_payload(messages, bot_id, conversation_id, user_model, cred_obj, final_cookie, tools=tools)
 
                 logger.info("--- 准备向上游发送请求 (流式) ---")
                 
@@ -425,9 +446,17 @@ class DoubaoProvider(BaseProvider):
                                             logger.info("检测到审核垫片消息（model_content），已拦截屏蔽")
                                         else:
                                             print(m_content, end="", flush=True)
-                                            chunk = create_chat_completion_chunk(request_id, user_model, content=m_content)
-                                            yield create_sse_data(chunk)
-                                            streamed_to_client = True
+                                            # 检测是否进入工具调用模式
+                                            if not is_tool_calling_mode and ("<tool_calls" in m_content or "<invoke" in m_content):
+                                                is_tool_calling_mode = True
+                                                logger.info("流中检测到工具调用标签 (model_content)，切换到拦截模式")
+                                            
+                                            if is_tool_calling_mode:
+                                                tool_call_buffer.append(m_content)
+                                            else:
+                                                chunk = create_chat_completion_chunk(request_id, user_model, content=m_content)
+                                                yield create_sse_data(chunk)
+                                                streamed_to_client = True
                                             packet_extracted_text = True
 
                                     # --- 处理补丁操作 (patch_op) ---
@@ -448,12 +477,20 @@ class DoubaoProvider(BaseProvider):
                                                         logger.info("检测到审核垫片消息（patch_op），已拦截屏蔽")
                                                     else:
                                                         print(txt, end="", flush=True)
-                                                        if is_thinking:
-                                                            chunk = create_chat_completion_chunk(request_id, user_model, content="", reasoning_content=txt)
+                                                        # 检测是否进入工具调用模式
+                                                        if not is_tool_calling_mode and ("<tool_calls" in txt or "<invoke" in txt):
+                                                            is_tool_calling_mode = True
+                                                            logger.info("流中检测到工具调用标签 (patch_op)，切换到拦截模式")
+                                                        
+                                                        if is_tool_calling_mode:
+                                                            tool_call_buffer.append(txt)
                                                         else:
-                                                            chunk = create_chat_completion_chunk(request_id, user_model, content=txt)
-                                                        yield create_sse_data(chunk)
-                                                        streamed_to_client = True
+                                                            if is_thinking:
+                                                                chunk = create_chat_completion_chunk(request_id, user_model, content="", reasoning_content=txt)
+                                                            else:
+                                                                chunk = create_chat_completion_chunk(request_id, user_model, content=txt)
+                                                            yield create_sse_data(chunk)
+                                                            streamed_to_client = True
                                                         packet_extracted_text = True
                                                 
                                         # 处理图片逻辑
@@ -475,9 +512,17 @@ class DoubaoProvider(BaseProvider):
                                                     logger.info("检测到审核垫片消息（content_block），已拦截屏蔽")
                                                 else:
                                                     print(txt, end="", flush=True)
-                                                    chunk = create_chat_completion_chunk(request_id, user_model, content=txt)
-                                                    yield create_sse_data(chunk)
-                                                    streamed_to_client = True
+                                                    # 检测是否进入工具调用模式
+                                                    if not is_tool_calling_mode and ("<tool_calls" in txt or "<invoke" in txt):
+                                                        is_tool_calling_mode = True
+                                                        logger.info("流中检测到工具调用标签 (content_block)，切换到拦截模式")
+                                                    
+                                                    if is_tool_calling_mode:
+                                                        tool_call_buffer.append(txt)
+                                                    else:
+                                                        chunk = create_chat_completion_chunk(request_id, user_model, content=txt)
+                                                        yield create_sse_data(chunk)
+                                                        streamed_to_client = True
                                                     packet_extracted_text = True
                                         
                                         # 提取思考状态
@@ -498,12 +543,20 @@ class DoubaoProvider(BaseProvider):
                                             logger.info("检测到审核垫片消息（CHUNK_DELTA），已拦截屏蔽")
                                         else:
                                             print(delta_content, end="", flush=True)
-                                            if is_thinking:
-                                                chunk = create_chat_completion_chunk(request_id, user_model, content="", reasoning_content=delta_content)
+                                            # 检测是否进入工具调用模式
+                                            if not is_tool_calling_mode and ("<tool_calls" in delta_content or "<invoke" in delta_content):
+                                                is_tool_calling_mode = True
+                                                logger.info("流中检测到工具调用标签 (CHUNK_DELTA)，切换到拦截模式")
+                                            
+                                            if is_tool_calling_mode:
+                                                tool_call_buffer.append(delta_content)
                                             else:
-                                                chunk = create_chat_completion_chunk(request_id, user_model, content=delta_content)
-                                            yield create_sse_data(chunk)
-                                            streamed_to_client = True
+                                                if is_thinking:
+                                                    chunk = create_chat_completion_chunk(request_id, user_model, content="", reasoning_content=delta_content)
+                                                else:
+                                                    chunk = create_chat_completion_chunk(request_id, user_model, content=delta_content)
+                                                yield create_sse_data(chunk)
+                                                streamed_to_client = True
                             except json.JSONDecodeError:
                                 continue
                             except Exception as e:
@@ -513,9 +566,29 @@ class DoubaoProvider(BaseProvider):
                                 logger.error(f"解析流式数据出错: {str(e)}")
                                 continue
 
-                if not streamed_to_client:
+                if not streamed_to_client and not is_tool_calling_mode:
                     # 无论是否是新会话，只要没产生实际输出，通通报错告知外层换号。
                     raise Exception("上游服务器响应成功但未返回有效文字内容")
+
+                # --- [流结束后的工具调用解析] ---
+                if is_tool_calling_mode and tool_call_buffer:
+                    full_tool_text = "".join(tool_call_buffer)
+                    from app.utils.tool_utils import parse_tool_calls_robust, assemble_openai_tool_calls
+                    parsed_calls = parse_tool_calls_robust(full_tool_text)
+                    if parsed_calls:
+                        logger.success(f"流式解析成功，检测到工具调用: {parsed_calls}")
+                        openai_tool_calls = assemble_openai_tool_calls(parsed_calls)
+                        # 在流结束前，发送 tool_calls 块
+                        for tc in openai_tool_calls:
+                            # 模拟流式格式，虽然我们是一次性发出的
+                            chunk = {
+                                "id": request_id, "object": "chat.completion.chunk", "created": int(time.time()), "model": user_model,
+                                "choices": [{
+                                    "index": 0, "delta": {"tool_calls": [tc]}, "finish_reason": "tool_calls"
+                                }]
+                            }
+                            yield create_sse_data(chunk)
+                        streamed_to_client = True
 
                 # 成功结束
                 self.credential_manager.report_success(cred_obj["cookie"])
@@ -597,13 +670,13 @@ class DoubaoProvider(BaseProvider):
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36",
         }
 
-    async def _prepare_payload(self, messages: List[Dict[str, Any]], bot_id: str, conversation_id: str, user_model: str, cred_obj: Dict[str, Any], final_cookie: str) -> Dict[str, Any]:
+    async def _prepare_payload(self, messages: List[Dict[str, Any]], bot_id: str, conversation_id: str, user_model: str, cred_obj: Dict[str, Any], final_cookie: str, tools: List[Dict[str, Any]] = None) -> Dict[str, Any]:
         """
         构造发送给上游豆包 API 的核心 Payload。
         支持多模态输入（检测最后一条消息中的图片）。
         """
         # 1. 提取文字 Prompt
-        full_prompt = convert_messages_to_prompt(messages)
+        full_prompt = convert_messages_to_prompt(messages, tools=tools)
         
         # 2. 检测最新的一条消息是否有图片
         image_uris = []
