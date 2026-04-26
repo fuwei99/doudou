@@ -36,3 +36,27 @@ def create_chat_completion_chunk(
             }
         ]
     }
+
+def create_chat_completion_tool_calls_chunk(
+    request_id: str,
+    model: str,
+    tool_calls: list
+) -> Dict[str, Any]:
+    """
+    构造包含工具调用的 OpenAI 流式数据块。
+    """
+    return {
+        "id": request_id,
+        "object": "chat.completion.chunk",
+        "created": int(time.time()),
+        "model": model,
+        "choices": [
+            {
+                "index": 0,
+                "delta": {
+                    "tool_calls": tool_calls
+                },
+                "finish_reason": None
+            }
+        ]
+    }
